@@ -1,0 +1,699 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>🎹 Piano Transcriber</title>
+
+<!-- Tone.js (audio engine + Salamander Grand Piano samples) -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.js"></script>
+<!-- @tonejs/midi  — MIDI file parser -->
+<script src="https://cdn.jsdelivr.net/npm/@tonejs/midi@2.0.28/build/Midi.js"></script>
+
+<style>
+/* ── Reset & base ──────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --bg:       #0f1117;
+  --surface:  #1a1d27;
+  --card:     #22263a;
+  --accent:   #7c6af7;
+  --accent2:  #4fd1c5;
+  --text:     #e8eaf6;
+  --muted:    #7986a8;
+  --error:    #fc8181;
+  --success:  #68d391;
+  --white-key:#f0f0f0;
+  --black-key:#1a1a2e;
+  --key-active: #7c6af7;
+  --radius: 12px;
+}
+html { font-size: 16px; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+/* ── Layout ───────────────────────────────────────────────────────────── */
+.page { max-width: 860px; margin: 0 auto; padding: 2rem 1.5rem 4rem; }
+
+header { text-align: center; margin-bottom: 2.5rem; }
+header h1 { font-size: 2.4rem; font-weight: 800; letter-spacing: -0.5px; }
+header h1 span { color: var(--accent); }
+header p  { color: var(--muted); margin-top: .4rem; font-size: 1rem; }
+
+/* ── Input card ───────────────────────────────────────────────────────── */
+.card {
+  background: var(--card);
+  border-radius: var(--radius);
+  padding: 1.6rem;
+  margin-bottom: 1.4rem;
+}
+.card h2 { font-size: 1rem; color: var(--muted); font-weight: 600;
+           text-transform: uppercase; letter-spacing: .08em; margin-bottom: .9rem; }
+
+.url-row { display: flex; gap: .7rem; }
+.url-row input {
+  flex: 1;
+  background: var(--surface);
+  border: 1.5px solid transparent;
+  border-radius: 8px;
+  padding: .7rem 1rem;
+  color: var(--text);
+  font-size: .95rem;
+  outline: none;
+  transition: border-color .2s;
+}
+.url-row input:focus { border-color: var(--accent); }
+.url-row input::placeholder { color: var(--muted); }
+
+button {
+  cursor: pointer;
+  border: none;
+  border-radius: 8px;
+  font-weight: 700;
+  font-size: .9rem;
+  padding: .7rem 1.4rem;
+  transition: opacity .15s, transform .1s;
+}
+button:active { transform: scale(.97); }
+button:disabled { opacity: .45; cursor: not-allowed; }
+
+.btn-primary { background: var(--accent); color: #fff; }
+.btn-primary:hover:not(:disabled) { opacity: .88; }
+.btn-outline { background: transparent; border: 1.5px solid var(--accent);
+               color: var(--accent); }
+.btn-outline:hover:not(:disabled) { background: var(--accent); color: #fff; }
+.btn-sm { padding: .45rem .9rem; font-size: .8rem; }
+
+/* ── Progress ─────────────────────────────────────────────────────────── */
+#progress-section { display: none; }
+
+.step-label { font-size: .9rem; color: var(--muted); margin-bottom: .55rem;
+              min-height: 1.3em; }
+.progress-bar-bg {
+  background: var(--surface);
+  border-radius: 99px;
+  height: 8px;
+  overflow: hidden;
+}
+.progress-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent), var(--accent2));
+  border-radius: 99px;
+  width: 0%;
+  transition: width .4s ease;
+}
+
+/* ── Song metadata ────────────────────────────────────────────────────── */
+#meta-section { display: none; align-items: center; gap: 1rem; }
+#meta-thumb {
+  width: 72px; height: 54px; border-radius: 6px;
+  object-fit: cover; background: var(--surface);
+}
+#meta-title { font-weight: 700; font-size: 1rem; }
+#meta-duration { font-size: .8rem; color: var(--muted); margin-top: .2rem; }
+
+/* ── Player card ──────────────────────────────────────────────────────── */
+#player-section { display: none; }
+
+.transport-row {
+  display: flex; align-items: center; gap: .9rem; flex-wrap: wrap;
+  margin-bottom: 1rem;
+}
+.transport-row .time-display {
+  font-variant-numeric: tabular-nums;
+  font-size: .85rem;
+  color: var(--muted);
+  min-width: 80px;
+}
+.seek-bar {
+  flex: 1; min-width: 150px;
+  -webkit-appearance: none;
+  height: 5px;
+  border-radius: 99px;
+  background: var(--surface);
+  outline: none;
+  cursor: pointer;
+}
+.seek-bar::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px; height: 14px;
+  border-radius: 50%;
+  background: var(--accent);
+  cursor: pointer;
+}
+
+.tempo-row {
+  display: flex; align-items: center; gap: .7rem;
+  font-size: .85rem; color: var(--muted);
+  margin-top: .6rem;
+}
+.tempo-row input[type=range] {
+  -webkit-appearance: none;
+  width: 120px; height: 4px;
+  border-radius: 99px;
+  background: var(--surface);
+  outline: none;
+  cursor: pointer;
+}
+.tempo-row input[type=range]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 12px; height: 12px;
+  border-radius: 50%;
+  background: var(--accent2);
+  cursor: pointer;
+}
+#tempo-val { color: var(--accent2); font-weight: 700; min-width: 42px; }
+
+/* ── Piano keyboard ───────────────────────────────────────────────────── */
+#keyboard-wrap {
+  overflow-x: auto;
+  padding-bottom: .5rem;
+  margin-top: 1rem;
+  scrollbar-width: thin;
+  scrollbar-color: var(--accent) var(--surface);
+}
+#keyboard-canvas {
+  display: block;
+  margin: 0 auto;
+}
+
+/* ── Activity feed ────────────────────────────────────────────────────── */
+#note-feed {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .3rem;
+  min-height: 2rem;
+  margin-top: .8rem;
+}
+.note-chip {
+  background: var(--accent);
+  color: #fff;
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-size: .7rem;
+  font-weight: 700;
+  animation: fadeChip .7s ease forwards;
+}
+@keyframes fadeChip {
+  0%   { opacity: 1; transform: translateY(0); }
+  80%  { opacity: .8; }
+  100% { opacity: 0; transform: translateY(-6px); }
+}
+
+/* ── Download row ─────────────────────────────────────────────────────── */
+#download-row { display: none; justify-content: flex-end; margin-top: .8rem; gap: .6rem; }
+
+/* ── Error banner ─────────────────────────────────────────────────────── */
+#error-banner {
+  display: none;
+  background: rgba(252,129,129,.12);
+  border: 1px solid var(--error);
+  border-radius: 8px;
+  padding: .8rem 1rem;
+  color: var(--error);
+  font-size: .88rem;
+  margin-top: .6rem;
+}
+
+/* ── Footer ───────────────────────────────────────────────────────────── */
+footer {
+  text-align: center;
+  color: var(--muted);
+  font-size: .78rem;
+  margin-top: 3rem;
+}
+footer a { color: var(--accent); text-decoration: none; }
+
+/* ── Responsive ───────────────────────────────────────────────────────── */
+@media (max-width: 520px) {
+  header h1 { font-size: 1.7rem; }
+  .transport-row { gap: .6rem; }
+}
+</style>
+</head>
+<body>
+<div class="page">
+
+  <!-- Header -->
+  <header>
+    <h1>🎹 <span>Piano</span> Transcriber</h1>
+    <p>Paste any YouTube song URL and hear it transformed into a professional piano rendition.</p>
+  </header>
+
+  <!-- Input card -->
+  <div class="card">
+    <h2>YouTube URL</h2>
+    <div class="url-row">
+      <input id="url-input" type="url"
+             placeholder="https://www.youtube.com/watch?v=…"
+             autocomplete="off" spellcheck="false" />
+      <button class="btn-primary" id="go-btn" onclick="startTranscription()">
+        Transcribe →
+      </button>
+    </div>
+    <div id="error-banner"></div>
+  </div>
+
+  <!-- Song metadata -->
+  <div class="card" id="meta-section" style="display:none">
+    <div style="display:flex;align-items:center;gap:1rem">
+      <img id="meta-thumb" src="" alt="thumbnail" />
+      <div>
+        <div id="meta-title"></div>
+        <div id="meta-duration"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Progress card -->
+  <div class="card" id="progress-section">
+    <h2>Processing</h2>
+    <div class="step-label" id="step-label">Starting…</div>
+    <div class="progress-bar-bg">
+      <div class="progress-bar-fill" id="progress-fill"></div>
+    </div>
+  </div>
+
+  <!-- Player card -->
+  <div class="card" id="player-section">
+    <h2>🎶 Piano Version</h2>
+
+    <!-- Transport controls -->
+    <div class="transport-row">
+      <button class="btn-primary btn-sm" id="play-btn" onclick="togglePlay()">▶ Play</button>
+      <button class="btn-outline btn-sm" onclick="stopPlayback()">■ Stop</button>
+      <input type="range" class="seek-bar" id="seek-bar"
+             min="0" max="100" value="0" oninput="seek(this.value)" />
+      <span class="time-display" id="time-display">0:00 / 0:00</span>
+    </div>
+
+    <!-- Tempo / speed control -->
+    <div class="tempo-row">
+      <span>Tempo:</span>
+      <input type="range" id="tempo-slider"
+             min="50" max="200" value="100" oninput="updateTempo(this.value)" />
+      <span id="tempo-val">100%</span>
+      <span style="margin-left:.4rem;color:var(--muted)">Volume:</span>
+      <input type="range" id="vol-slider"
+             min="0" max="100" value="80" oninput="updateVolume(this.value)" />
+    </div>
+
+    <!-- Piano keyboard canvas -->
+    <div id="keyboard-wrap">
+      <canvas id="keyboard-canvas"></canvas>
+    </div>
+
+    <!-- Live note display -->
+    <div id="note-feed"></div>
+
+    <!-- Download -->
+    <div id="download-row">
+      <a id="dl-link" href="#" class="btn-outline btn-sm"
+         style="display:inline-block;text-decoration:none;padding:.45rem .9rem;
+                font-weight:700;font-size:.8rem;border:1.5px solid var(--accent);
+                color:var(--accent);border-radius:8px;">
+        ⬇ Download MIDI
+      </a>
+    </div>
+  </div>
+
+</div>
+
+<footer>
+  <p>Powered by <a href="https://spotify.github.io/basic-pitch/" target="_blank">Spotify basic-pitch</a>
+  · <a href="https://tonejs.github.io/" target="_blank">Tone.js</a>
+  · Salamander Grand Piano samples
+  · For personal / educational use only</p>
+</footer>
+
+<!-- ═══════════════════════════════════════════════════════════════════════
+     JavaScript
+════════════════════════════════════════════════════════════════════════ -->
+<script>
+// ── State ──────────────────────────────────────────────────────────────────
+let currentJobId   = null;
+let pollTimer      = null;
+let midiData       = null;   // parsed Midi object
+let totalDuration  = 0;
+let scheduledParts = [];
+let isPlaying      = false;
+let playStartTime  = 0;      // Tone.now() when play was pressed
+let tempoScale     = 1.0;
+let sampler        = null;
+let samplerReady   = false;
+
+// Active piano keys: Set of MIDI note numbers
+const activeKeys = new Set();
+
+// Piano dimensions
+const PIANO = {
+  startNote: 21,   // A0
+  endNote:   108,  // C8
+  whiteH:    110,
+  whiteW:    22,
+  blackH:    68,
+  blackW:    13,
+};
+
+// ── Boot ───────────────────────────────────────────────────────────────────
+window.addEventListener("load", () => {
+  buildKeyboard();
+  initSampler();
+});
+
+// ── Sampler (Salamander Grand Piano via Tone.js CDN) ───────────────────────
+function initSampler() {
+  // Salamander Grand Piano — hosted on Tone.js GitHub Pages
+  sampler = new Tone.Sampler({
+    urls: {
+      A0: "A0.mp3", C1: "C1.mp3", "D#1": "Ds1.mp3", "F#1": "Fs1.mp3",
+      A1: "A1.mp3", C2: "C2.mp3", "D#2": "Ds2.mp3", "F#2": "Fs2.mp3",
+      A2: "A2.mp3", C3: "C3.mp3", "D#3": "Ds3.mp3", "F#3": "Fs3.mp3",
+      A3: "A3.mp3", C4: "C4.mp3", "D#4": "Ds4.mp3", "F#4": "Fs4.mp3",
+      A4: "A4.mp3", C5: "C5.mp3", "D#5": "Ds5.mp3", "F#5": "Fs5.mp3",
+      A5: "A5.mp3", C6: "C6.mp3", "D#6": "Ds6.mp3", "F#6": "Fs6.mp3",
+      A6: "A6.mp3", C7: "C7.mp3", "D#7": "Ds7.mp3", "F#7": "Fs7.mp3",
+      A7: "A7.mp3", C8: "C8.mp3",
+    },
+    baseUrl: "https://tonejs.github.io/audio/salamander/",
+    onload:  () => { samplerReady = true; console.log("🎹 Piano samples loaded!"); },
+    onerror: (err) => console.warn("Sampler load error:", err),
+  }).toDestination();
+
+  Tone.getDestination().volume.value = -4;  // slight headroom
+}
+
+// ── Transcription flow ─────────────────────────────────────────────────────
+async function startTranscription() {
+  const url = document.getElementById("url-input").value.trim();
+  if (!url) { showError("Please paste a YouTube URL."); return; }
+
+  clearError();
+  setUI("processing");
+  stopPlayback();
+
+  try {
+    const res = await fetch("/api/process", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Server error");
+
+    currentJobId = data.job_id;
+    pollTimer = setInterval(pollStatus, 1500);
+    fetchMetadata();
+  } catch (err) {
+    showError(err.message);
+    setUI("idle");
+  }
+}
+
+async function fetchMetadata() {
+  await new Promise(r => setTimeout(r, 3000));  // wait for yt-dlp
+  try {
+    const res  = await fetch(`/api/info/${currentJobId}`);
+    const info = await res.json();
+    if (info.title) {
+      document.getElementById("meta-title").textContent = info.title;
+      document.getElementById("meta-duration").textContent =
+        "Duration: " + fmtTime(info.duration);
+      if (info.thumb)
+        document.getElementById("meta-thumb").src = info.thumb;
+      document.getElementById("meta-section").style.display = "block";
+    }
+  } catch (_) {}
+}
+
+async function pollStatus() {
+  try {
+    const res  = await fetch(`/api/status/${currentJobId}`);
+    const data = await res.json();
+
+    document.getElementById("step-label").textContent = data.step || "…";
+    document.getElementById("progress-fill").style.width = (data.progress || 0) + "%";
+
+    if (data.status === "done") {
+      clearInterval(pollTimer);
+      await loadAndPrepareMidi();
+    } else if (data.status === "error") {
+      clearInterval(pollTimer);
+      showError("Processing failed: " + (data.error || "unknown error"));
+      setUI("idle");
+    }
+  } catch (_) {}
+}
+
+// ── MIDI loading ───────────────────────────────────────────────────────────
+async function loadAndPrepareMidi() {
+  try {
+    const res  = await fetch(`/api/midi/${currentJobId}`);
+    const buf  = await res.arrayBuffer();
+
+    midiData = new Midi(buf);
+    totalDuration = midiData.duration;
+
+    setUI("player");
+    document.getElementById("dl-link").href = `/api/midi/${currentJobId}`;
+    document.getElementById("dl-link").download = "piano_version.mid";
+    document.getElementById("time-display").textContent =
+      "0:00 / " + fmtTime(totalDuration);
+
+    // Wait for sampler before playing
+    if (!samplerReady) {
+      document.getElementById("step-label").textContent =
+        "Loading piano samples… (first time only)";
+      await Tone.loaded();
+    }
+    scheduleMidi();
+  } catch (err) {
+    showError("Could not load MIDI: " + err.message);
+    setUI("idle");
+  }
+}
+
+// ── Tone.js MIDI scheduling ────────────────────────────────────────────────
+function scheduleMidi() {
+  Tone.Transport.cancel();
+  Tone.Transport.stop();
+  Tone.Transport.position = 0;
+
+  if (!midiData) return;
+
+  const bpm       = midiData.header.tempos[0]?.bpm ?? 120;
+  Tone.Transport.bpm.value = bpm * tempoScale;
+
+  midiData.tracks.forEach(track => {
+    track.notes.forEach(note => {
+      Tone.Transport.schedule(time => {
+        if (!sampler || !samplerReady) return;
+        const vel = note.velocity ?? 0.7;
+        sampler.triggerAttackRelease(note.name, note.duration, time, vel);
+        flashKey(note.midi, note.duration);
+        addNoteChip(note.name);
+      }, note.time / tempoScale);
+    });
+  });
+
+  // Update seek bar every 100ms
+  Tone.Transport.scheduleRepeat(updateSeek, "100ms");
+}
+
+function updateSeek() {
+  const pos  = Tone.Transport.seconds;
+  const pct  = totalDuration > 0 ? (pos / totalDuration) * 100 : 0;
+  document.getElementById("seek-bar").value = Math.min(pct, 100);
+  document.getElementById("time-display").textContent =
+    fmtTime(pos) + " / " + fmtTime(totalDuration);
+
+  if (pos >= totalDuration * tempoScale + 0.3) stopPlayback();
+}
+
+// ── Playback controls ──────────────────────────────────────────────────────
+async function togglePlay() {
+  await Tone.start();  // unlock AudioContext on first user gesture
+
+  if (isPlaying) {
+    Tone.Transport.pause();
+    document.getElementById("play-btn").textContent = "▶ Play";
+    isPlaying = false;
+  } else {
+    Tone.Transport.start();
+    document.getElementById("play-btn").textContent = "⏸ Pause";
+    isPlaying = true;
+  }
+}
+
+function stopPlayback() {
+  Tone.Transport.stop();
+  Tone.Transport.cancel();
+  document.getElementById("play-btn").textContent = "▶ Play";
+  document.getElementById("seek-bar").value = 0;
+  document.getElementById("time-display").textContent =
+    "0:00 / " + fmtTime(totalDuration);
+  activeKeys.clear();
+  drawKeyboard();
+  isPlaying = false;
+  if (midiData) scheduleMidi();  // re-schedule from beginning
+}
+
+function seek(pct) {
+  const t = (pct / 100) * totalDuration;
+  Tone.Transport.seconds = t;
+}
+
+function updateTempo(val) {
+  tempoScale = val / 100;
+  document.getElementById("tempo-val").textContent = val + "%";
+  const bpm = midiData?.header.tempos[0]?.bpm ?? 120;
+  Tone.Transport.bpm.value = bpm * tempoScale;
+}
+
+function updateVolume(val) {
+  Tone.getDestination().volume.value = Tone.gainToDb(val / 100);
+}
+
+// ── Piano keyboard ─────────────────────────────────────────────────────────
+function buildKeyboard() {
+  const canvas = document.getElementById("keyboard-canvas");
+  const { startNote, endNote, whiteW } = PIANO;
+  const whiteCount = countWhiteKeys(startNote, endNote);
+  canvas.width  = whiteCount * whiteW;
+  canvas.height = PIANO.whiteH;
+  drawKeyboard();
+}
+
+function drawKeyboard() {
+  const canvas = document.getElementById("keyboard-canvas");
+  const ctx    = canvas.getContext("2d");
+  const { startNote, endNote, whiteH, whiteW, blackH, blackW } = PIANO;
+
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  // White keys pass 1
+  let wx = 0;
+  for (let n = startNote; n <= endNote; n++) {
+    if (!isBlackKey(n)) {
+      const active = activeKeys.has(n);
+      ctx.fillStyle = active ? "var(--key-active, #7c6af7)" : PIANO.whiteKey || "#f0f0f0";
+      ctx.strokeStyle = "#888";
+      ctx.lineWidth   = 1;
+      ctx.fillRect(wx, 0, whiteW - 1, whiteH);
+      ctx.strokeRect(wx, 0, whiteW - 1, whiteH);
+
+      if (n % 12 === 0) {  // C notes — label
+        ctx.fillStyle = active ? "#fff" : "#777";
+        ctx.font      = "9px sans-serif";
+        ctx.textAlign = "center";
+        ctx.fillText("C" + Math.floor(n / 12 - 1), wx + whiteW / 2, whiteH - 6);
+      }
+      wx += whiteW;
+    }
+  }
+
+  // Black keys pass 2 (drawn on top)
+  wx = 0;
+  for (let n = startNote; n <= endNote; n++) {
+    if (isBlackKey(n)) {
+      const prevWhiteX = wx - whiteW;  // position of the white key before this black key
+      const bx = prevWhiteX + whiteW - blackW / 2 - 1;
+      const active = activeKeys.has(n);
+      ctx.fillStyle = active ? "var(--key-active, #7c6af7)" : "#1a1a2e";
+      ctx.fillRect(bx, 0, blackW, blackH);
+    } else {
+      wx += whiteW;
+    }
+  }
+}
+
+function isBlackKey(n) {
+  return [1, 3, 6, 8, 10].includes(n % 12);
+}
+
+function countWhiteKeys(start, end) {
+  let c = 0;
+  for (let n = start; n <= end; n++) if (!isBlackKey(n)) c++;
+  return c;
+}
+
+function flashKey(midiNote, duration) {
+  activeKeys.add(midiNote);
+  drawKeyboard();
+  const releaseMs = Math.min((duration || 0.3) * 1000, 1200);
+  setTimeout(() => {
+    activeKeys.delete(midiNote);
+    drawKeyboard();
+  }, releaseMs);
+}
+
+// ── Note chips ─────────────────────────────────────────────────────────────
+function addNoteChip(name) {
+  const feed  = document.getElementById("note-feed");
+  const chip  = document.createElement("span");
+  chip.className  = "note-chip";
+  chip.textContent = name;
+  feed.appendChild(chip);
+  chip.addEventListener("animationend", () => chip.remove());
+  // Keep feed tidy
+  while (feed.children.length > 30) feed.removeChild(feed.firstChild);
+}
+
+// ── UI state machine ───────────────────────────────────────────────────────
+function setUI(state) {
+  const prog   = document.getElementById("progress-section");
+  const player = document.getElementById("player-section");
+  const dlRow  = document.getElementById("download-row");
+  const goBtn  = document.getElementById("go-btn");
+
+  if (state === "processing") {
+    prog.style.display   = "block";
+    player.style.display = "none";
+    dlRow.style.display  = "none";
+    goBtn.disabled       = true;
+    goBtn.textContent    = "Processing…";
+  } else if (state === "player") {
+    prog.style.display   = "none";
+    player.style.display = "block";
+    dlRow.style.display  = "flex";
+    goBtn.disabled       = false;
+    goBtn.textContent    = "Transcribe →";
+  } else {
+    prog.style.display   = "none";
+    player.style.display = "none";
+    dlRow.style.display  = "none";
+    goBtn.disabled       = false;
+    goBtn.textContent    = "Transcribe →";
+    document.getElementById("meta-section").style.display = "none";
+  }
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+function fmtTime(secs) {
+  const s = Math.floor(secs % 60);
+  const m = Math.floor(secs / 60);
+  return m + ":" + String(s).padStart(2, "0");
+}
+function showError(msg) {
+  const b = document.getElementById("error-banner");
+  b.textContent = "⚠ " + msg;
+  b.style.display = "block";
+}
+function clearError() {
+  document.getElementById("error-banner").style.display = "none";
+}
+
+// Allow pressing Enter to trigger transcription
+document.addEventListener("DOMContentLoaded", () => {
+  document.getElementById("url-input").addEventListener("keydown", e => {
+    if (e.key === "Enter") startTranscription();
+  });
+});
+</script>
+</body>
+</html>

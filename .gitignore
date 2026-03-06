@@ -1,0 +1,57 @@
+# ── Virtual environments ──────────────────────────────────────────────────────
+venv/
+venv311/
+.venv/
+env/
+
+# ── Large audio files (WAVs are several GB — never commit these) ──────────────
+training_data/**/*.wav
+training_data/**/*.mp3
+training_data/**/*.flac
+training_data/**/cover_stems/
+
+# ── Generated MIDI outputs (user output, not source code) ────────────────────
+midi_outputs/
+
+# ── Python cache ──────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# ── macOS junk ────────────────────────────────────────────────────────────────
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# ── Editor files ──────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ── Temporary / build files ───────────────────────────────────────────────────
+*.tmp
+*.log
+build/
+dist/
+*.egg-info/
+
+# ── What IS committed (everything else):
+# pipeline.py          ← main ML pipeline
+# app.py               ← Flask web server
+# collect_data.py      ← training data downloader
+# analyze_pairs.py     ← style profile builder
+# auto_collect.py      ← YouTube auto-search
+# check.py             ← system diagnostic
+# songs.csv            ← training song URLs
+# start.sh / start.bat ← one-click launchers
+# setup.sh             ← dependency installer
+# install_extra.sh     ← extra package installer
+# requirements.txt     ← pip requirements
+# templates/           ← web UI HTML
+# training_data/**/*.json  ← features, patterns, style profile (small, valuable)
+# training_data/**/*.mid   ← cover MIDIs (small, valuable ground truth)
+# README.md            ← documentation

@@ -1,0 +1,499 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>🎹 Piano Transcriber</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #0d0d0f;
+    color: #e8e8e8;
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 30px 16px 60px;
+  }
+  h1 { font-size: 2rem; font-weight: 700; margin-bottom: 6px; letter-spacing: -0.5px; }
+  .subtitle { color: #888; font-size: 0.9rem; margin-bottom: 32px; }
+
+  .card {
+    background: #17171a;
+    border: 1px solid #2a2a30;
+    border-radius: 14px;
+    padding: 24px 28px;
+    width: 100%;
+    max-width: 700px;
+    margin-bottom: 20px;
+  }
+  .card h2 { font-size: 1rem; font-weight: 600; color: #aaa; margin-bottom: 14px; text-transform: uppercase; letter-spacing: 0.08em; }
+
+  .url-row { display: flex; gap: 10px; }
+  .url-row input {
+    flex: 1;
+    background: #0d0d0f;
+    border: 1px solid #333;
+    border-radius: 8px;
+    padding: 11px 14px;
+    color: #fff;
+    font-size: 0.95rem;
+    outline: none;
+    transition: border-color 0.2s;
+  }
+  .url-row input:focus { border-color: #5b8def; }
+  .url-row input::placeholder { color: #555; }
+
+  button {
+    background: #5b8def;
+    color: #fff;
+    border: none;
+    border-radius: 8px;
+    padding: 11px 22px;
+    font-size: 0.95rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.2s, opacity 0.2s;
+  }
+  button:hover { background: #4a7de0; }
+  button:disabled { opacity: 0.45; cursor: not-allowed; }
+
+  /* Progress */
+  #progress-section { display: none; }
+  .progress-bar-track {
+    background: #222;
+    border-radius: 20px;
+    height: 8px;
+    overflow: hidden;
+    margin-bottom: 8px;
+  }
+  .progress-bar-fill {
+    background: linear-gradient(90deg, #5b8def, #a78bfa);
+    height: 100%;
+    width: 0%;
+    border-radius: 20px;
+    transition: width 0.5s ease;
+  }
+  #status-msg { color: #aaa; font-size: 0.88rem; }
+
+  /* Player */
+  #player-section { display: none; }
+  .controls { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
+  .ctrl-btn {
+    background: #222;
+    border: 1px solid #333;
+    border-radius: 8px;
+    padding: 9px 18px;
+    font-size: 0.9rem;
+  }
+  .ctrl-btn:hover { background: #2a2a30; }
+  .ctrl-btn.active { background: #5b8def; border-color: #5b8def; }
+
+  .seek-row { display: flex; align-items: center; gap:10px; margin-bottom: 12px; }
+  #seek { flex: 1; accent-color: #5b8def; cursor: pointer; }
+  #time-display { color: #888; font-size: 0.82rem; min-width: 90px; text-align: right; }
+
+  .slider-row { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; font-size: 0.85rem; color: #888; }
+  .slider-row input[type=range] { accent-color: #5b8def; width: 130px; }
+
+  /* Piano keyboard */
+  #piano-canvas { display: block; width: 100%; border-radius: 8px; margin-top: 12px; cursor: default; }
+
+  /* Note chips */
+  #note-chips { min-height: 28px; display: flex; flex-wrap: wrap; gap: 6px; margin-top: 14px; }
+  .chip {
+    background: #5b8def22;
+    border: 1px solid #5b8def55;
+    border-radius: 20px;
+    padding: 3px 10px;
+    font-size: 0.78rem;
+    color: #a0c0ff;
+    animation: chipIn 0.15s ease;
+  }
+  @keyframes chipIn { from { opacity:0; transform:scale(0.85); } to { opacity:1; transform:scale(1); } }
+
+  /* Download */
+  #dl-btn { margin-top: 14px; background: #222; border: 1px solid #333; }
+  #dl-btn:hover { background: #2a2a30; }
+
+  .error-msg { color: #f87171; font-size: 0.88rem; margin-top: 8px; }
+</style>
+</head>
+<body>
+
+<h1>🎹 Piano Transcriber</h1>
+<p class="subtitle">Paste a YouTube link → hear a piano version in your browser</p>
+
+<!-- Input card -->
+<div class="card">
+  <h2>YouTube Song URL</h2>
+  <div class="url-row">
+    <input id="url-input" type="text" placeholder="https://www.youtube.com/watch?v=…" autocomplete="off"/>
+    <button id="process-btn" onclick="startProcessing()">Convert</button>
+  </div>
+  <div id="error-msg" class="error-msg"></div>
+</div>
+
+<!-- Progress card -->
+<div class="card" id="progress-section">
+  <h2>Processing</h2>
+  <div class="progress-bar-track"><div class="progress-bar-fill" id="progress-fill"></div></div>
+  <div id="status-msg">Starting…</div>
+</div>
+
+<!-- Player card -->
+<div class="card" id="player-section">
+  <h2>Piano Player</h2>
+
+  <div class="controls">
+    <button class="ctrl-btn" id="play-btn"  onclick="togglePlay()">▶ Play</button>
+    <button class="ctrl-btn" id="stop-btn"  onclick="stopPlayback()">■ Stop</button>
+    <button id="dl-btn" onclick="downloadMidi()">⬇ Download MIDI</button>
+  </div>
+
+  <div class="seek-row">
+    <span style="color:#888;font-size:.82rem">0:00</span>
+    <input type="range" id="seek" min="0" max="1000" value="0" oninput="seekTo(this.value)"/>
+    <span id="time-display">0:00 / 0:00</span>
+  </div>
+
+  <div class="slider-row">
+    <span>Tempo</span>
+    <input type="range" id="tempo-slider" min="50" max="200" value="100" oninput="updateTempo(this.value)"/>
+    <span id="tempo-label">100%</span>
+    <span style="margin-left:16px">Volume</span>
+    <input type="range" id="vol-slider" min="-40" max="0" value="-6" oninput="updateVolume(this.value)"/>
+    <span id="vol-label">-6 dB</span>
+  </div>
+
+  <canvas id="piano-canvas" height="80"></canvas>
+  <div id="note-chips"></div>
+</div>
+
+<!-- Tone.js + MIDI parser -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tonejs/midi@2.0.28/build/Midi.js"></script>
+
+<script>
+// ─── State ───────────────────────────────────────────────────────────────
+let currentJobId   = null;
+let pollInterval   = null;
+let midiData       = null;   // parsed Midi object
+let scheduledIds   = [];
+let isPlaying      = false;
+let startAudioTime = 0;      // Tone.now() when play started
+let startMidiSec   = 0;      // song offset we started from
+let songDuration   = 0;
+let animFrame      = null;
+let activeNotes    = new Set();
+let rafLoop        = null;
+
+// ─── Tone.js setup ───────────────────────────────────────────────────────
+const MAX_POLY = 8;
+const compressor = new Tone.Compressor(-18, 4).toDestination();
+const sampler = new Tone.Sampler({
+  urls: {
+    A0:'A0.mp3', C1:'C1.mp3', 'D#1':'Ds1.mp3', 'F#1':'Fs1.mp3',
+    A1:'A1.mp3', C2:'C2.mp3', 'D#2':'Ds2.mp3', 'F#2':'Fs2.mp3',
+    A2:'A2.mp3', C3:'C3.mp3', 'D#3':'Ds3.mp3', 'F#3':'Fs3.mp3',
+    A3:'A3.mp3', C4:'C4.mp3', 'D#4':'Ds4.mp3', 'F#4':'Fs4.mp3',
+    A4:'A4.mp3', C5:'C5.mp3', 'D#5':'Ds5.mp3', 'F#5':'Fs5.mp3',
+    A5:'A5.mp3', C6:'C6.mp3', 'D#6':'Ds6.mp3', 'F#6':'Fs6.mp3',
+    A6:'A6.mp3', C7:'C7.mp3', 'D#7':'Ds7.mp3', 'F#7':'Fs7.mp3',
+    A7:'A7.mp3', C8:'C8.mp3',
+  },
+  release: 1.0,
+  baseUrl: 'https://gleitz.github.io/midi-js-soundfonts/Yamaha-Grand-Lite-v2.2/acoustic_grand_piano-mp3/',
+  onload: () => console.log('Sampler ready'),
+}).connect(compressor);
+
+// ─── Processing ──────────────────────────────────────────────────────────
+function showError(msg) {
+  document.getElementById('error-msg').textContent = msg;
+}
+
+async function startProcessing() {
+  const url = document.getElementById('url-input').value.trim();
+  if (!url) { showError('Please paste a YouTube URL first.'); return; }
+  showError('');
+
+  document.getElementById('process-btn').disabled = true;
+  document.getElementById('progress-section').style.display = 'block';
+  document.getElementById('player-section').style.display   = 'none';
+  setStatus('Queued…', 0);
+
+  const resp = await fetch('/api/process', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({url})
+  });
+  const data = await resp.json();
+  if (data.error) { showError(data.error); return; }
+
+  currentJobId = data.job_id;
+  pollInterval = setInterval(pollStatus, 2500);
+}
+
+async function pollStatus() {
+  if (!currentJobId) return;
+  try {
+    const r = await fetch(`/api/status/${currentJobId}`);
+    const d = await r.json();
+    setStatus(d.message || d.status, d.pct || 0);
+
+    if (d.status === 'done') {
+      clearInterval(pollInterval);
+      await loadAndShowPlayer();
+    } else if (d.status === 'error') {
+      clearInterval(pollInterval);
+      showError('Error: ' + d.message);
+      document.getElementById('process-btn').disabled = false;
+    }
+  } catch (e) { console.warn('Poll error', e); }
+}
+
+function setStatus(msg, pct) {
+  document.getElementById('status-msg').textContent = msg;
+  document.getElementById('progress-fill').style.width = pct + '%';
+}
+
+// ─── MIDI loading ────────────────────────────────────────────────────────
+async function loadAndShowPlayer() {
+  const resp = await fetch(`/api/midi/${currentJobId}`);
+  const buf  = await resp.arrayBuffer();
+  midiData   = new Midi(buf);
+  songDuration = midiData.duration;
+
+  document.getElementById('player-section').style.display = 'block';
+  document.getElementById('progress-section').style.display = 'none';
+  document.getElementById('process-btn').disabled = false;
+
+  const tempoSlider = document.getElementById('tempo-slider');
+  const detectedBpm = midiData.header.tempos[0]?.bpm || 100;
+  tempoSlider.value = 100;
+  updateTempo(100);
+
+  drawPiano();
+}
+
+// ─── Playback ────────────────────────────────────────────────────────────
+async function togglePlay() {
+  await Tone.start();
+  if (isPlaying) {
+    pausePlayback();
+  } else {
+    startPlayback(startMidiSec);
+  }
+}
+
+function startPlayback(fromSec) {
+  stopPlayback();
+  isPlaying      = true;
+  startMidiSec   = fromSec;
+  startAudioTime = Tone.now() + 0.1;
+  document.getElementById('play-btn').textContent = '⏸ Pause';
+
+  const rate = parseFloat(document.getElementById('tempo-slider').value) / 100;
+
+  // Schedule all notes
+  scheduledIds = [];
+  for (const track of midiData.tracks) {
+    for (const note of track.notes) {
+      const noteSec = note.time;
+      if (noteSec < fromSec) continue;
+      const delay = startAudioTime + (noteSec - fromSec) / rate;
+      const dur   = Math.max(0.05, note.duration / rate);
+      const pitch = Tone.Frequency(note.midi, 'midi').toNote();
+      const vel   = note.velocity;
+
+      const id = Tone.Transport.scheduleOnce(t => {
+        if (!isPlaying) return;
+        // enforce polyphony cap
+        sampler.triggerAttackRelease(pitch, dur, t, vel);
+        activeNotes.add(note.midi);
+        setTimeout(() => activeNotes.delete(note.midi), (delay - Tone.now() + dur) * 1000);
+      }, delay);
+      scheduledIds.push(id);
+    }
+  }
+
+  Tone.Transport.start();
+  rafLoop = requestAnimationFrame(uiLoop);
+}
+
+function pausePlayback() {
+  isPlaying = false;
+  // save position
+  startMidiSec = startMidiSec + (Tone.now() - startAudioTime) *
+    (parseFloat(document.getElementById('tempo-slider').value) / 100);
+  cancelAllScheduled();
+  Tone.Transport.stop();
+  document.getElementById('play-btn').textContent = '▶ Play';
+  cancelAnimationFrame(rafLoop);
+}
+
+function stopPlayback() {
+  isPlaying    = false;
+  startMidiSec = 0;
+  cancelAllScheduled();
+  Tone.Transport.stop();
+  sampler.releaseAll();
+  activeNotes.clear();
+  document.getElementById('play-btn').textContent = '▶ Play';
+  document.getElementById('seek').value = 0;
+  document.getElementById('time-display').textContent = fmt(0) + ' / ' + fmt(songDuration);
+  cancelAnimationFrame(rafLoop);
+  drawPiano();
+}
+
+function cancelAllScheduled() {
+  scheduledIds.forEach(id => Tone.Transport.clear(id));
+  scheduledIds = [];
+}
+
+function seekTo(val) {
+  const sec = (val / 1000) * songDuration;
+  if (isPlaying) {
+    startPlayback(sec);
+  } else {
+    startMidiSec = sec;
+    document.getElementById('time-display').textContent = fmt(sec) + ' / ' + fmt(songDuration);
+  }
+}
+
+function updateTempo(val) {
+  document.getElementById('tempo-label').textContent = val + '%';
+  Tone.Transport.bpm.value = (midiData?.header.tempos[0]?.bpm || 100) * val / 100;
+  if (isPlaying) startPlayback(currentSongTime());
+}
+
+function updateVolume(val) {
+  document.getElementById('vol-label').textContent = val + ' dB';
+  Tone.Destination.volume.value = parseFloat(val);
+}
+
+function currentSongTime() {
+  if (!isPlaying) return startMidiSec;
+  const rate = parseFloat(document.getElementById('tempo-slider').value) / 100;
+  return startMidiSec + (Tone.now() - startAudioTime) * rate;
+}
+
+function fmt(s) {
+  s = Math.max(0, s);
+  return Math.floor(s/60) + ':' + String(Math.floor(s%60)).padStart(2,'0');
+}
+
+// ─── UI loop ─────────────────────────────────────────────────────────────
+let lastChipUpdate = 0;
+function uiLoop(ts) {
+  if (!isPlaying) return;
+
+  const t = currentSongTime();
+  if (t >= songDuration) { stopPlayback(); return; }
+
+  // Seek bar
+  document.getElementById('seek').value = (t / songDuration) * 1000;
+  document.getElementById('time-display').textContent = fmt(t) + ' / ' + fmt(songDuration);
+
+  // Active notes from MIDI data (look-ahead 0–50ms)
+  const activeNow = new Set();
+  for (const track of midiData.tracks) {
+    for (const note of track.notes) {
+      if (note.time <= t + 0.05 && note.time + note.duration >= t) {
+        activeNow.add(note.midi);
+      }
+    }
+  }
+  activeNotes = activeNow;
+
+  drawPiano(activeNow);
+
+  // Note chips (throttled 100ms)
+  if (ts - lastChipUpdate > 100) {
+    lastChipUpdate = ts;
+    const chips = document.getElementById('note-chips');
+    chips.innerHTML = '';
+    let shown = 0;
+    for (const midi of activeNow) {
+      if (shown++ > 8) break;
+      const span = document.createElement('span');
+      span.className = 'chip';
+      span.textContent = Tone.Frequency(midi,'midi').toNote();
+      chips.appendChild(span);
+    }
+  }
+
+  rafLoop = requestAnimationFrame(uiLoop);
+}
+
+// ─── Piano keyboard ───────────────────────────────────────────────────────
+const NOTE_IS_BLACK = [0,1,0,1,0,0,1,0,1,0,1,0]; // C=0 index
+
+function drawPiano(activeSet = new Set()) {
+  const canvas = document.getElementById('piano-canvas');
+  const ctx    = canvas.getContext('2d');
+  const W = canvas.offsetWidth || 660;
+  const H = 80;
+  canvas.width  = W;
+  canvas.height = H;
+
+  const FIRST = 21, LAST = 108;
+  // Count white keys
+  let wCount = 0;
+  for (let m = FIRST; m <= LAST; m++) if (!NOTE_IS_BLACK[m % 12]) wCount++;
+  const wW = W / wCount;
+  const bW = wW * 0.58;
+  const bH = H * 0.62;
+
+  // Draw white keys
+  let wx = 0;
+  const wPos = {}; // midi -> x
+  for (let m = FIRST; m <= LAST; m++) {
+    if (NOTE_IS_BLACK[m % 12]) continue;
+    const on = activeSet.has(m);
+    ctx.fillStyle = on ? '#5b8def' : '#f0f0f0';
+    ctx.strokeStyle = '#333';
+    ctx.fillRect(wx, 0, wW - 1, H);
+    ctx.strokeRect(wx, 0, wW - 1, H);
+    wPos[m] = wx;
+    wx += wW;
+  }
+
+  // Draw black keys
+  wx = 0;
+  for (let m = FIRST; m <= LAST; m++) {
+    if (NOTE_IS_BLACK[m % 12]) {
+      // find previous white key x
+      const prevW = wPos[m - 1] ?? (wx - wW);
+      const bx = prevW + wW - bW * 0.5;
+      const on = activeSet.has(m);
+      ctx.fillStyle = on ? '#a78bfa' : '#111';
+      ctx.fillRect(bx, 0, bW, bH);
+    } else {
+      wx += wW;
+    }
+  }
+}
+
+// ─── Download ─────────────────────────────────────────────────────────────
+async function downloadMidi() {
+  if (!currentJobId) return;
+  const a = document.createElement('a');
+  a.href = `/api/midi/${currentJobId}`;
+  a.download = 'piano_transcription.mid';
+  a.click();
+}
+
+// ─── Init ─────────────────────────────────────────────────────────────────
+window.addEventListener('load', () => {
+  drawPiano();
+  // allow Enter key to submit
+  document.getElementById('url-input').addEventListener('keydown', e => {
+    if (e.key === 'Enter') startProcessing();
+  });
+});
+window.addEventListener('resize', () => drawPiano(activeNotes));
+</script>
+</body>
+</html>

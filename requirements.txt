@@ -1,0 +1,8 @@
+flask>=2.3
+yt-dlp>=2024.1
+basic-pitch>=0.3.0
+pretty_midi>=0.2.9
+numpy>=1.24
+librosa>=0.10
+soundfile>=0.12
+demucs>=4.0

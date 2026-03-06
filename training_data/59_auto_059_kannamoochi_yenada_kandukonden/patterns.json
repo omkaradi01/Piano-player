@@ -1,0 +1,37 @@
+{
+  "rh_note_count": 1297,
+  "lh_note_count": 489,
+  "notes_per_beat_rh": 2.702,
+  "scale_degree_dist": {
+    "0": 0.2113,
+    "1": 0.0031,
+    "2": 0.0524,
+    "3": 0.0062,
+    "4": 0.0979,
+    "5": 0.0941,
+    "6": 0.0015,
+    "7": 0.3061,
+    "8": 0.0062,
+    "9": 0.1249,
+    "10": 0.0123,
+    "11": 0.084
+  },
+  "rh_dur_mean_beats": 0.447,
+  "rh_dur_median_beats": 0.368,
+  "primary_octave": 4,
+  "rh_pitch_min": 60,
+  "rh_pitch_max": 101,
+  "rh_pitch_median": 70,
+  "lh_common_intervals": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    7,
+    8,
+    9,
+    10
+  ]
+}
