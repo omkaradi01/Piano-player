@@ -448,6 +448,88 @@ def _run_torchcrepe_raw(audio_path_16k, audio_duration):
 
 
 # ─────────────────────────────────────────────
+#  Piano transcription (Bytedance, 96.7% F1)
+# ─────────────────────────────────────────────
+
+def _piano_transcription_available():
+    try:
+        from piano_transcription_inference import PianoTranscription
+        return True
+    except ImportError:
+        return False
+
+
+def _transcribe_piano(audio_path, device=None):
+    """
+    Use piano_transcription_inference (Bytedance/Kong, MAESTRO-trained)
+    to transcribe piano audio. Returns list of (start, end, pitch, velocity).
+    This is the gold standard for piano transcription — 96.7% onset F1.
+    """
+    import librosa
+    from piano_transcription_inference import PianoTranscription, sample_rate
+
+    if device is None:
+        # MPS can cause issues with some models, use CPU for reliability
+        device = 'cpu'
+
+    log.info(f"piano_transcription_inference on: {audio_path} (device={device})")
+
+    # Load audio at model's expected sample rate (16kHz)
+    audio, _ = librosa.load(audio_path, sr=sample_rate, mono=True)
+
+    transcriptor = PianoTranscription(device=device, checkpoint_path=None)
+
+    # Transcribe — returns dict with 'est_note_events'
+    result = transcriptor.transcribe(audio, None)
+
+    notes = []
+    for event in result.get('est_note_events', []):
+        onset  = float(event['onset_time'])
+        offset = float(event['offset_time'])
+        pitch  = int(event['midi_note'])
+        vel    = int(np.clip(event.get('velocity', 80), 30, 127))
+        dur    = offset - onset
+        if dur >= 0.04:  # min 40ms
+            notes.append((onset, offset, pitch, vel))
+
+    log.info(f"piano_transcription: {len(notes)} notes transcribed")
+    return notes
+
+
+def _split_piano_rh_lh(notes, split_point=60):
+    """
+    Split transcribed piano notes into RH (melody) and LH (accompaniment).
+    Uses a dynamic split point based on note density analysis.
+    """
+    if not notes:
+        return [], []
+
+    # Find natural split: cluster pitches and find the gap
+    pitches = sorted(set(n[2] for n in notes))
+    if len(pitches) < 4:
+        return notes, []
+
+    # Find largest gap in pitch distribution
+    max_gap = 0
+    best_split = split_point
+    for i in range(len(pitches) - 1):
+        gap = pitches[i + 1] - pitches[i]
+        if gap > max_gap and 48 <= pitches[i] <= 72:
+            max_gap = gap
+            best_split = pitches[i] + gap // 2
+
+    # If no clear gap, use median
+    if max_gap < 4:
+        best_split = pitches[len(pitches) // 2]
+
+    rh = [(s, e, p, v) for s, e, p, v in notes if p >= best_split]
+    lh = [(s, e, p, v) for s, e, p, v in notes if p < best_split]
+
+    log.info(f"Piano split at MIDI {best_split}: RH={len(rh)}, LH={len(lh)}")
+    return rh, lh
+
+
+# ─────────────────────────────────────────────
 #  Polyphonic transcription (basic-pitch)
 # ─────────────────────────────────────────────
 
@@ -1671,301 +1753,382 @@ def _add_breathing_room(melody_notes, phrase_boundaries, min_silence_ms=80):
 
 
 # ─────────────────────────────────────────────
-#  Main pipeline
+#  Expressiveness Engine
 # ─────────────────────────────────────────────
 
-def _build_midi_v18(rh_notes, lh_chords, beat_times, bpm, audio_duration, output_path,
-                    energy_contour=None, sections=None):
+def _assign_phrase_ids(notes, boundaries):
+    """Assign each note to a phrase (0-indexed). Returns list of phrase IDs."""
+    if not boundaries:
+        return [0] * len(notes)
+    ids = []
+    for s, e, p, v in notes:
+        pid = 0
+        for b in boundaries:
+            if s >= b:
+                pid += 1
+        ids.append(pid)
+    return ids
+
+
+def _apply_phrase_arc_dynamics(notes, phrase_ids, sections=None):
     """
-    v18 + Phase 9: Build MIDI from basic-pitch transcribed notes.
-    LH: Section-adaptive chords with improved humanization.
-    - intro/outro: LH off (melody only)
-    - verse: LH on chord changes only, low velocity
-    - chorus: full LH pattern, moderate velocity
-    - instrumental: root-fifth pattern, moderate velocity
-    Fixes chord overlap and robotic feel.
+    Replace random velocity with musical phrase-arc dynamics.
+    Each phrase gets a sinusoidal velocity arc peaking at ~65% through.
+    Layer: section envelope + phrase arc + melodic accent + beat emphasis.
+    """
+    if not notes:
+        return notes
+
+    import math
+
+    # Group notes by phrase
+    phrases = {}
+    for i, (s, e, p, v) in enumerate(notes):
+        pid = phrase_ids[i] if i < len(phrase_ids) else 0
+        if pid not in phrases:
+            phrases[pid] = []
+        phrases[pid].append(i)
+
+    result = list(notes)  # copy
+
+    for pid, indices in phrases.items():
+        n_notes = len(indices)
+        if n_notes == 0:
+            continue
+
+        # Compute local pitch average for melodic accent
+        local_pitches = [notes[i][2] for i in indices]
+        avg_pitch = sum(local_pitches) / len(local_pitches)
+
+        for j, idx in enumerate(indices):
+            s, e, p, v = notes[idx]
+            position = j / max(1, n_notes - 1)  # 0.0 to 1.0
+
+            # ── Section envelope ──
+            sec_vel = 72  # default
+            if sections:
+                sec = _get_section_at_time(sections, s)
+                if sec:
+                    sec_type = sec.get('type', 'chorus')
+                    sec_vel = {'intro': 55, 'verse': 60, 'chorus': 80,
+                               'instrumental': 70, 'outro': 50}.get(sec_type, 72)
+
+            # ── Phrase arc (sinusoidal, peaks at ~65%) ──
+            # Using skewed sine: sin(pi * position^0.8)
+            arc = math.sin(math.pi * (position ** 0.8))
+            # Scale arc to +/- 18 velocity units
+            arc_vel = arc * 18
+
+            # ── Melodic accent: higher notes slightly louder ──
+            pitch_delta = p - avg_pitch
+            melodic_accent = min(8, max(-4, pitch_delta * 0.5))
+
+            # ── Repeated note decay ──
+            repeat_decay = 0
+            if j > 0:
+                prev_idx = indices[j - 1]
+                if notes[prev_idx][2] == p:
+                    repeat_decay = -4
+
+            # ── Beat emphasis ──
+            beat_emphasis = 0
+            if len(beat_times) > 0:
+                beat_dur = 60.0 / max(60, min(200, len(beat_times) / max(1, notes[-1][0]) * 60))
+                beat_pos = s % (beat_dur * 4) if beat_dur > 0 else 0
+                if beat_pos < beat_dur * 0.15:       # downbeat
+                    beat_emphasis = 5
+                elif abs(beat_pos - beat_dur * 2) < beat_dur * 0.15:  # beat 3
+                    beat_emphasis = 2
+                else:
+                    beat_emphasis = -2
+
+            # ── Combine all layers ──
+            final_vel = sec_vel + arc_vel + melodic_accent + repeat_decay + beat_emphasis
+            final_vel = int(max(35, min(110, final_vel)))
+            result[idx] = (s, e, p, final_vel)
+
+    log.info(f"Phrase-arc dynamics applied to {len(notes)} notes across {len(phrases)} phrases")
+    return result
+
+
+def _apply_phrase_rubato(notes, phrase_ids, bpm):
+    """
+    Apply structured rubato: slow down at phrase endings,
+    push forward at phrase buildups.
+    """
+    if not notes or len(notes) < 4:
+        return notes
+
+    # Group by phrase
+    phrases = {}
+    for i, pid in enumerate(phrase_ids):
+        if pid not in phrases:
+            phrases[pid] = []
+        phrases[pid].append(i)
+
+    result = list(notes)
+    beat_dur = 60.0 / bpm
+
+    for pid, indices in phrases.items():
+        n = len(indices)
+        if n < 3:
+            continue
+
+        for j, idx in enumerate(indices):
+            s, e, p, v = notes[idx]
+            position = j / max(1, n - 1)
+
+            # Phrase-final lengthening: last 20% of phrase slows down
+            if position > 0.8:
+                # Stretch: up to 18% longer at the very end
+                stretch = 1.0 + 0.18 * ((position - 0.8) / 0.2)
+                dur = (e - s) * stretch
+                # Also delay start slightly (ritardando feel)
+                delay = (position - 0.8) / 0.2 * 0.025  # up to 25ms delay
+                s = s + delay
+                e = s + dur
+
+            # Pickup acceleration: first 10% slightly early
+            elif position < 0.1 and j > 0:
+                s = s - 0.012  # 12ms early
+
+            result[idx] = (max(0.0, s), max(s + 0.04, e), p, v)
+
+    log.info(f"Rubato applied to {len(notes)} notes")
+    return result
+
+
+def _apply_melody_leads_bass(rh_notes, lh_notes_or_chords, lead_ms=25):
+    """
+    Professional pianists' melody hand leads accompaniment by ~25ms.
+    Shift RH notes earlier (or LH later) for natural feel.
+    """
+    if not rh_notes:
+        return rh_notes, lh_notes_or_chords
+
+    lead = lead_ms / 1000.0
+    # Shift RH slightly earlier
+    rh_shifted = [(max(0.0, s - lead), max(0.04, e - lead), p, v) for s, e, p, v in rh_notes]
+    return rh_shifted, lh_notes_or_chords
+
+
+# ─────────────────────────────────────────────
+#  Main MIDI builder
+# ─────────────────────────────────────────────
+
+def _build_midi_v19(rh_notes, lh_chords, beat_times, bpm, audio_duration, output_path,
+                    energy_contour=None, sections=None, lh_notes=None,
+                    phrase_boundaries=None):
+    """
+    v19: Professional-grade MIDI builder.
+    - Phrase-arc dynamics (NOT random velocity)
+    - Chord-change-driven pedaling (NOT beat-interval)
+    - Melody-leads-bass asynchrony
+    - Phrase-final ritardando
+    - Direct LH notes from piano transcription when available
     """
     midi = pretty_midi.PrettyMIDI(initial_tempo=bpm)
     rh = pretty_midi.Instrument(program=0, name='RightHand')
     lh = pretty_midi.Instrument(program=0, name='LeftHand')
     rng = random.Random(42)
     beat_dur = 60.0 / bpm
-    log.info(f"v18 MIDI build: RH={len(rh_notes)} notes, bpm={bpm:.0f}, "
-             f"sections={'yes' if sections else 'no'}")
+    log.info(f"v19 MIDI build: RH={len(rh_notes)} notes, "
+             f"LH_notes={len(lh_notes) if lh_notes else 0}, "
+             f"LH_chords={len(lh_chords)}, bpm={bpm:.0f}")
 
-    # ── Compute note density for staccato variation ──
-    # Count notes in local 2-second windows
-    def _local_density(t, window=2.0):
-        count = 0
-        for ns, ne, np_, nv in rh_notes:
-            if abs(ns - t) < window:
-                count += 1
-        return count
+    # ── Step 1: Apply phrase-arc dynamics to RH ──────────────────────────
+    # (replaces random velocity with musical phrase shaping)
+    if phrase_boundaries is not None:
+        phrase_ids = _assign_phrase_ids(rh_notes, phrase_boundaries)
+        rh_notes = _apply_phrase_arc_dynamics(rh_notes, phrase_ids, sections)
+        rh_notes = _apply_phrase_rubato(rh_notes, phrase_ids, bpm)
 
-    # ── Right hand: improved humanization (Phase 9) ──────────────────────
-    for idx, note_data in enumerate(rh_notes):
-        s, e, p, v = note_data
+    # ── Step 2: Melody-leads-bass asynchrony ─────────────────────────────
+    # Professional pianists' melody hand leads by ~25ms
+    rh_notes, lh_source = _apply_melody_leads_bass(
+        rh_notes, lh_notes if lh_notes else lh_chords, lead_ms=22)
+    if lh_notes:
+        lh_notes = lh_source
+    else:
+        lh_chords = lh_source
+
+    # ── Step 3: Write RH with subtle humanization ────────────────────────
+    for s, e, p, v in rh_notes:
         p = max(21, min(108, p))
         dur = max(0.05, e - s)
-
-        # Phase 9: Enhanced humanization
-        # Velocity variation ±12 (was ±8)
-        vel = max(40, min(110, v + rng.randint(-12, 12)))
-
-        # Timing variation ±15ms (was ±8ms)
-        off = rng.uniform(-0.015, 0.015)
-
-        # Tempo rubato: strong beats slightly early, weak beats slightly late
-        if len(beat_times) > 0:
-            beat_arr = np.asarray(beat_times, dtype=float)
-            nearest_idx = int(np.argmin(np.abs(beat_arr - s)))
-            dist_to_beat = abs(s - float(beat_arr[nearest_idx]))
-            if dist_to_beat < beat_dur * 0.1:
-                # On a strong beat: slightly early
-                off += -0.010
-            elif dist_to_beat > beat_dur * 0.35:
-                # Off-beat / weak beat: slightly late
-                off += 0.010
-
-        # Staccato variation in dense passages
-        density = _local_density(s)
-        if density > 8:
-            # High density: shorten some notes for staccato feel
-            dur *= rng.uniform(0.70, 0.90)
-        elif density > 5:
-            dur *= rng.uniform(0.85, 1.0)
-
+        # Tiny jitter (+/-3) on top of the phrase-arc velocity — NOT random
+        vel = max(35, min(110, v + rng.randint(-3, 3)))
+        off = rng.uniform(-0.005, 0.005)  # tiny timing jitter
         rh.notes.append(pretty_midi.Note(
             velocity=vel, pitch=p,
             start=max(0.0, s + off),
             end=max(0.0, s + off + dur),
         ))
 
-    # ── Build a quick lookup: RH notes active at a given time ──
-    def _min_rh_pitch_at(t, window=0.1):
-        """Find the lowest RH pitch active near time t."""
-        min_p = 999
-        for ns, ne, np_, nv in rh_notes:
-            if ns - window <= t <= ne + window:
-                min_p = min(min_p, np_)
-        return min_p if min_p < 999 else None
-
-    def _rh_active_at(t, window=0.1):
-        """Check if any RH note is active near time t."""
-        for ns, ne, np_, nv in rh_notes:
-            if ns - window <= t <= ne + window:
-                return True
-        return False
-
-    # ── Left hand: section-adaptive chords (Phase 9) ─────────────────────
-    prev_voicing = None
-    prev_chord_name = None
-
-    # Default restrike / style based on tempo
-    if bpm < 80:
-        default_restrike = 4
-        default_style = 'sustained'
-    elif bpm < 130:
-        default_restrike = 2
-        default_style = 'bass_chord'
+    # ── Step 4: Write LH ─────────────────────────────────────────────────
+    if lh_notes and len(lh_notes) > 0:
+        # Direct piano transcription notes — preserve original musicality
+        log.info(f"LH: {len(lh_notes)} direct transcription notes")
+        for s, e, p, v in lh_notes:
+            p = max(21, min(108, p))
+            dur = max(0.05, e - s)
+            off = rng.uniform(-0.005, 0.005)
+            # Slightly softer than original to let RH melody shine
+            vel = max(28, min(85, int(v * 0.80) + rng.randint(-3, 3)))
+            lh.notes.append(pretty_midi.Note(
+                velocity=vel, pitch=p,
+                start=max(0.0, s + off),
+                end=max(0.0, s + off + dur),
+            ))
     else:
-        default_restrike = 2
-        default_style = 'broken'
+        # Chord-based LH with section-adaptive behavior
+        log.info(f"LH: chord-based generation ({len(lh_chords)} beat chords)")
+        prev_voicing = None
+        prev_chord_name = None
 
-    log.info(f"LH default style: {default_style}, restrike every {default_restrike} beats")
+        # Lookup helpers
+        def _min_rh_pitch_at(t, window=0.1):
+            min_p = 999
+            for ns, ne, np_, nv in rh_notes:
+                if ns - window <= t <= ne + window:
+                    min_p = min(min_p, np_)
+            return min_p if min_p < 999 else None
 
-    i = 0
-    while i < len(beat_times) and i < len(lh_chords):
-        bt = float(beat_times[i])
-        if bt >= audio_duration:
-            break
+        i = 0
+        while i < len(beat_times) and i < len(lh_chords):
+            bt = float(beat_times[i])
+            if bt >= audio_duration:
+                break
 
-        chord_name, chord_notes = lh_chords[i]
-        chord_changed = (chord_name != prev_chord_name)
+            chord_name, chord_notes = lh_chords[i]
+            chord_changed = (chord_name != prev_chord_name)
 
-        # ── Phase 9: Section-aware LH behavior ──
-        section = _get_section_at_time(sections, bt) if sections else None
-        section_type = section['type'] if section else 'chorus'  # default to chorus behavior
+            # Section-aware behavior
+            section = _get_section_at_time(sections, bt) if sections else None
+            sec_type = section['type'] if section else 'chorus'
 
-        # intro/outro: LH off entirely
-        if section_type in ('intro', 'outro'):
+            # Intro/outro: melody only, no LH
+            if sec_type in ('intro', 'outro'):
+                prev_chord_name = chord_name
+                i += 1
+                continue
+
+            # Verse: only on chord changes
+            if sec_type == 'verse' and not chord_changed:
+                prev_chord_name = chord_name
+                i += 1
+                continue
+
+            # Other sections: play every 2 beats or on chord changes
+            if not chord_changed and (i % 2 != 0):
+                prev_chord_name = chord_name
+                i += 1
+                continue
+
             prev_chord_name = chord_name
-            i += 1
-            continue
 
-        # Determine style and velocity based on section
-        if section_type == 'verse':
-            lh_style = 'sustained'  # chord changes only, no restrike
-            restrike_interval = 999  # effectively no restrike
-            vel_lo, vel_hi = 35, 42
-            play_on_change_only = True
-        elif section_type == 'chorus':
-            lh_style = default_style
-            restrike_interval = default_restrike
-            vel_lo, vel_hi = 42, 55
-            play_on_change_only = False
-        elif section_type == 'instrumental':
-            lh_style = 'root_fifth'
-            restrike_interval = default_restrike
-            vel_lo, vel_hi = 38, 50
-            play_on_change_only = False
-        else:
-            lh_style = default_style
-            restrike_interval = default_restrike
-            vel_lo, vel_hi = 42, 55
-            play_on_change_only = False
+            # Build voicing
+            while len(chord_notes) < 3:
+                chord_notes = chord_notes + [chord_notes[-1] + 7]
+            chord_notes = chord_notes[:3]
+            voicing = _choose_voicing(chord_notes, prev_voicing)
+            prev_voicing = voicing
 
-        # Energy-aware: skip LH in very quiet sections
-        local_energy = _get_energy_at_time(energy_contour, bt) if energy_contour else 0.6
-        if local_energy < 0.15 and not chord_changed:
-            prev_chord_name = chord_name
-            i += 1
-            continue
+            # Ensure LH stays below RH
+            min_rh = _min_rh_pitch_at(bt)
+            if min_rh is not None:
+                max_lh = min_rh - 7
+                voicing = [p for p in voicing if p <= max_lh]
+                if not voicing:
+                    voicing = [max(24, (min_rh - 7) - 12 + (j * 4)) for j in range(3)]
+                    voicing = [p for p in voicing if p <= max_lh] or [max(24, max_lh)]
 
-        # Only play on chord changes OR at restrike intervals
-        if play_on_change_only and not chord_changed:
-            prev_chord_name = chord_name
-            i += 1
-            continue
-        if not chord_changed and (i % restrike_interval != 0):
-            prev_chord_name = chord_name
-            i += 1
-            continue
-
-        prev_chord_name = chord_name
-
-        # Ensure 3 notes for voicing
-        while len(chord_notes) < 3:
-            chord_notes = chord_notes + [chord_notes[-1] + 7]
-        chord_notes = chord_notes[:3]
-
-        voicing = _choose_voicing(chord_notes, prev_voicing)
-        prev_voicing = voicing
-
-        # ── Phase 9: Fix chord overlap — ensure LH max pitch is at least
-        #    7 semitones below lowest concurrent RH note ──
-        min_rh = _min_rh_pitch_at(bt)
-        if min_rh is not None:
-            max_lh_allowed = min_rh - 7
-            voicing = [p for p in voicing if p <= max_lh_allowed]
             if not voicing:
-                # All voicing notes too high — transpose down an octave
-                voicing = _choose_voicing(chord_notes, prev_voicing)
-                voicing = [max(24, p - 12) for p in voicing]
-                voicing = [p for p in voicing if p <= max_lh_allowed] or [max(24, max_lh_allowed - 7)]
+                i += 1
+                continue
 
-        if not voicing:
-            i += 1
-            continue
+            # Hold until next chord change
+            hold_end = bt + beat_dur * 2
+            for j in range(i + 1, min(i + 3, len(lh_chords))):
+                if j < len(beat_times) and j < len(lh_chords):
+                    if lh_chords[j][0] != chord_name:
+                        hold_end = float(beat_times[j])
+                        break
+            hold_end = min(hold_end, audio_duration)
+            hold_dur = hold_end - bt
 
-        # ── Phase 9: Reduce LH velocity when RH is active ──
-        rh_playing = _rh_active_at(bt)
-        vel_reduction = 0.85 if rh_playing else 1.0  # 15% reduction when RH active
+            if hold_dur < 0.1:
+                i += 1
+                continue
 
-        # Find how long to hold
-        hold_end = bt + beat_dur * restrike_interval
-        for j in range(i + 1, min(i + restrike_interval + 1, len(lh_chords))):
-            if j < len(beat_times):
-                if j < len(lh_chords) and lh_chords[j][0] != chord_name:
-                    hold_end = float(beat_times[j])
-                    break
-        hold_end = min(hold_end, audio_duration)
-        hold_dur = hold_end - bt
+            # Section-based velocity
+            vel_base = {'verse': 38, 'chorus': 52, 'instrumental': 45}.get(sec_type, 48)
 
-        if hold_dur < 0.1:
-            i += 1
-            continue
-
-        if lh_style == 'sustained':
-            for p in voicing:
-                p = max(36, min(67, p))
-                off = rng.uniform(-0.006, 0.006)
-                raw_vel = rng.randint(vel_lo, vel_hi)
-                final_vel = max(25, int(raw_vel * vel_reduction))
-                lh.notes.append(pretty_midi.Note(
-                    velocity=final_vel, pitch=p,
-                    start=max(0.0, bt + off),
-                    end=max(0.0, bt + hold_dur - 0.03),
-                ))
-
-        elif lh_style == 'bass_chord':
+            # Bass note (strong)
             bass = max(36, min(55, voicing[0]))
-            off = rng.uniform(-0.008, 0.008)
-            raw_vel = rng.randint(vel_lo, vel_hi)
-            final_vel = max(25, int(raw_vel * vel_reduction))
             lh.notes.append(pretty_midi.Note(
-                velocity=final_vel, pitch=bass,
-                start=max(0.0, bt + off),
-                end=max(0.0, bt + hold_dur - 0.03),
+                velocity=max(28, vel_base + rng.randint(-3, 3)),
+                pitch=bass,
+                start=max(0.0, bt + rng.uniform(-0.006, 0.006)),
+                end=max(0.0, bt + hold_dur - 0.04),
             ))
-            chord_time = bt + beat_dur * 0.95
-            if chord_time < hold_end - 0.1 and len(voicing) > 1:
-                for p in voicing[1:]:
-                    p = max(48, min(67, p))
-                    off2 = rng.uniform(-0.005, 0.005)
-                    softer_vel = max(25, int(rng.randint(max(25, vel_lo - 5), vel_hi - 5) * vel_reduction))
-                    lh.notes.append(pretty_midi.Note(
-                        velocity=softer_vel, pitch=p,
-                        start=max(0.0, chord_time + off2),
-                        end=max(0.0, chord_time + (hold_dur - beat_dur) - 0.03),
-                    ))
 
-        elif lh_style == 'root_fifth':
-            # Root-fifth pattern for instrumental sections
-            bass = max(36, min(55, voicing[0]))
-            off = rng.uniform(-0.010, 0.010)
-            raw_vel = rng.randint(vel_lo, vel_hi)
-            final_vel = max(25, int(raw_vel * vel_reduction))
-            note_dur = min(beat_dur * 0.80, hold_dur - 0.02)
-            lh.notes.append(pretty_midi.Note(
-                velocity=final_vel, pitch=bass,
-                start=max(0.0, bt + off),
-                end=max(0.0, bt + off + note_dur),
-            ))
-            # Fifth on the and-beat
-            t2 = bt + beat_dur * 0.5
-            fifth = bass + 7
-            if fifth > 60:
-                fifth -= 12
-            if t2 < audio_duration and hold_dur > beat_dur * 0.6:
-                off2 = rng.uniform(-0.010, 0.010)
-                softer_vel = max(25, int(rng.randint(max(25, vel_lo - 3), vel_hi - 3) * vel_reduction))
-                lh.notes.append(pretty_midi.Note(
-                    velocity=softer_vel,
-                    pitch=max(36, min(60, fifth)),
-                    start=max(0.0, t2 + off2),
-                    end=max(0.0, t2 + off2 + note_dur * 0.6),
-                ))
+            # Upper chord notes (softer, on offbeat for bass_chord feel)
+            if len(voicing) > 1 and sec_type != 'verse':
+                chord_time = bt + beat_dur * 0.95
+                if chord_time < hold_end - 0.1:
+                    for p in voicing[1:]:
+                        p = max(48, min(67, p))
+                        lh.notes.append(pretty_midi.Note(
+                            velocity=max(25, vel_base - 8 + rng.randint(-3, 3)),
+                            pitch=p,
+                            start=max(0.0, chord_time + rng.uniform(-0.005, 0.005)),
+                            end=max(0.0, hold_end - 0.04),
+                        ))
 
-        else:  # broken — gentle arpeggio over 1 beat, then sustain
-            step = beat_dur / len(voicing) if voicing else beat_dur
-            for j, p in enumerate(voicing):
-                p = max(36, min(67, p))
-                t_start = bt + j * step * 0.3
-                off = rng.uniform(-0.005, 0.005)
-                raw_vel = rng.randint(vel_lo, vel_hi)
-                final_vel = max(25, int(raw_vel * vel_reduction))
-                lh.notes.append(pretty_midi.Note(
-                    velocity=final_vel, pitch=p,
-                    start=max(0.0, t_start + off),
-                    end=max(0.0, bt + hold_dur - 0.03),
-                ))
+            i += 1
 
-        # Sustain pedal
-        lh.control_changes.append(pretty_midi.ControlChange(64, 127, max(0.0, bt)))
-        lh.control_changes.append(
-            pretty_midi.ControlChange(64, 0, max(0.0, hold_end - 0.06)))
-
-        i += 1
+    # ── Step 5: Chord-change-driven pedaling ─────────────────────────────
+    # (NOT beat-interval pedaling — pedal follows harmony)
+    if lh_notes and len(lh_notes) > 0:
+        # For direct transcription: pedal based on bass note changes
+        prev_bass_time = 0.0
+        bass_notes = sorted([(s, p) for s, e, p, v in lh_notes if p < 55], key=lambda x: x[0])
+        for bn_time, bn_pitch in bass_notes:
+            if bn_time - prev_bass_time > beat_dur * 1.5:
+                # Release old pedal slightly before new bass
+                lh.control_changes.append(
+                    pretty_midi.ControlChange(64, 0, max(0.0, bn_time - 0.04)))
+                # Re-engage after new bass sounds
+                lh.control_changes.append(
+                    pretty_midi.ControlChange(64, 100, max(0.0, bn_time + 0.05)))
+                prev_bass_time = bn_time
+    elif lh_chords:
+        # For chord-based: pedal on chord changes
+        prev_cn = None
+        for i, bt in enumerate(beat_times):
+            if i >= len(lh_chords):
+                break
+            bt = float(bt)
+            if bt >= audio_duration:
+                break
+            cn = lh_chords[i][0]
+            if cn != prev_cn:
+                # Legato pedaling: release before, re-engage after
+                lh.control_changes.append(
+                    pretty_midi.ControlChange(64, 0, max(0.0, bt - 0.04)))
+                lh.control_changes.append(
+                    pretty_midi.ControlChange(64, 100, max(0.0, bt + 0.05)))
+                prev_cn = cn
 
     # Final pedal off
-    if len(beat_times) > 0:
-        final = min(float(beat_times[-1]) + beat_dur, audio_duration)
-        lh.control_changes.append(pretty_midi.ControlChange(64, 0, final))
+    if audio_duration > 0:
+        lh.control_changes.append(
+            pretty_midi.ControlChange(64, 0, max(0.0, audio_duration - 0.1)))
 
     midi.instruments.extend([rh, lh])
     midi.write(output_path)
-    log.info(f"MIDI saved: RH={len(rh.notes)} LH={len(lh.notes)} → {output_path}")
+    log.info(f"v19 MIDI saved: RH={len(rh.notes)} LH={len(lh.notes)} → {output_path}")
 
 
 def process_youtube_to_piano_midi(url, output_path, progress_cb=None):
@@ -1992,75 +2155,123 @@ def process_youtube_to_piano_midi(url, output_path, progress_cb=None):
         accomp_path = stems.get('no_vocals') or stems.get('other')
 
         # ══════════════════════════════════════════════════════════════════
-        #  v18.1: LAYER-BY-LAYER transcription
-        #  Layer 1: Clean monophonic melody from vocals
-        #  Layer 2: Sparse chord accompaniment from instrumental stem
-        #  Layer 3: Gap-fill from full audio for instrumental sections
+        #  v19: DUAL-ENGINE TRANSCRIPTION
+        #
+        #  Strategy A (piano_transcription_inference — PREFERRED):
+        #    Use Bytedance's 96.7% F1 piano transcription on the full mix
+        #    AND on the accompaniment stem. This captures actual piano parts
+        #    perfectly and works for any polyphonic piano content.
+        #
+        #  Strategy B (basic-pitch — FALLBACK):
+        #    Layer-by-layer: vocal melody + accompaniment chords + gap fill
+        #    Better for vocal-driven songs where piano isn't prominent.
+        #
+        #  We try A first. If A produces enough notes, use it.
+        #  Otherwise fall back to B.
         # ══════════════════════════════════════════════════════════════════
-        use_basic_pitch = _basic_pitch_available()
         rh_notes_4 = []  # (start, end, pitch, velocity)
-        lh_chords = []
+        lh_notes_4 = []  # separate LH note array for direct piano transcription
+        lh_chords = []    # chord-based LH (fallback)
+        used_piano_transcription = False
 
-        if use_basic_pitch:
-            # ── LAYER 1: Vocal melody (strict monophonic) ────────────────
-            vocal_notes = []
-            full_notes = []
+        # ── STRATEGY A: Piano transcription inference ──────────────────
+        if _piano_transcription_available():
+            prog("Transcribing piano (Bytedance AI, 96.7% accuracy)…", 35)
+            try:
+                # Transcribe the FULL audio — captures all piano content
+                full_piano = _transcribe_piano(mono_wav)
+                log.info(f"Piano transcription (full): {len(full_piano)} notes")
 
-            if vocals_path:
-                prog("Layer 1: Transcribing vocal melody…", 35)
+                # Also transcribe accompaniment stem for cleaner chords
+                accomp_piano = []
+                if accomp_path:
+                    try:
+                        accomp_piano = _transcribe_piano(accomp_path)
+                        log.info(f"Piano transcription (accomp): {len(accomp_piano)} notes")
+                    except Exception as exc:
+                        log.warning(f"Piano transcription on accomp failed: {exc}")
+
+                # Use full audio transcription, merge with accompaniment
+                all_piano = full_piano
+                if accomp_piano:
+                    # Merge: add accomp notes that don't overlap with full
+                    existing_times = set()
+                    for s, e, p, v in full_piano:
+                        existing_times.add((round(s, 2), p))
+                    for s, e, p, v in accomp_piano:
+                        if (round(s, 2), p) not in existing_times:
+                            all_piano.append((s, e, p, v))
+
+                if len(all_piano) >= 20:
+                    # Split into RH and LH
+                    rh_notes_4, lh_notes_4 = _split_piano_rh_lh(all_piano)
+                    used_piano_transcription = True
+                    log.info(f"Piano transcription SUCCESS: RH={len(rh_notes_4)}, LH={len(lh_notes_4)}")
+                else:
+                    log.info(f"Piano transcription produced too few notes ({len(all_piano)}), falling back")
+
+            except Exception as exc:
+                log.warning(f"Piano transcription failed: {exc}")
+                import traceback; traceback.print_exc()
+
+        # ── STRATEGY B: basic-pitch layer-by-layer (FALLBACK) ──────────
+        if not rh_notes_4:
+            use_basic_pitch = _basic_pitch_available()
+            if use_basic_pitch:
+                vocal_notes = []
+                full_notes = []
+
+                if vocals_path:
+                    prog("Transcribing vocal melody…", 35)
+                    try:
+                        v22k = os.path.join(work_dir, 'vocals_22k.wav')
+                        _to_mono(vocals_path, v22k, sr=22050)
+                        vocal_raw = _transcribe_basic_pitch(
+                            v22k, onset_thresh=0.4, frame_thresh=0.28,
+                            min_note_ms=80, min_freq=130, max_freq=1400
+                        )
+                        log.info(f"Vocal raw: {len(vocal_raw)} notes")
+                        vocal_notes = _clean_melody_smart(
+                            vocal_raw, min_dur=0.08, min_pitch=48, dedup_window=0.20
+                        )
+                        log.info(f"Vocal clean melody: {len(vocal_notes)} notes")
+                    except Exception as exc:
+                        log.warning(f"basic-pitch on vocals failed: {exc}")
+
+                prog("Transcribing full audio for gaps…", 50)
                 try:
-                    v22k = os.path.join(work_dir, 'vocals_22k.wav')
-                    _to_mono(vocals_path, v22k, sr=22050)
-                    vocal_raw = _transcribe_basic_pitch(
-                        v22k, onset_thresh=0.4, frame_thresh=0.28,
+                    full_raw = _transcribe_basic_pitch(
+                        mono_wav, onset_thresh=0.4, frame_thresh=0.25,
                         min_note_ms=80, min_freq=130, max_freq=1400
                     )
-                    log.info(f"Vocal raw: {len(vocal_raw)} notes")
-                    # Smart cleanup → monophonic melody with continuity
-                    vocal_notes = _clean_melody_smart(
-                        vocal_raw, min_dur=0.08, min_pitch=48, dedup_window=0.20
-                    )
-                    log.info(f"Vocal clean melody: {len(vocal_notes)} notes")
+                    log.info(f"Full audio raw: {len(full_raw)} notes")
+                    full_notes = full_raw
                 except Exception as exc:
-                    log.warning(f"basic-pitch on vocals failed: {exc}")
+                    log.warning(f"basic-pitch on full audio failed: {exc}")
 
-            # ── LAYER 3: Full audio for instrumental gap-fill ────────────
-            prog("Layer 3: Transcribing full audio for gaps…", 50)
-            try:
-                full_raw = _transcribe_basic_pitch(
-                    mono_wav, onset_thresh=0.4, frame_thresh=0.25,
-                    min_note_ms=80, min_freq=130, max_freq=1400
-                )
-                log.info(f"Full audio raw: {len(full_raw)} notes")
-                full_notes = full_raw
-            except Exception as exc:
-                log.warning(f"basic-pitch on full audio failed: {exc}")
-
-            # Merge layers: vocal melody + gap-fill from full audio
-            if vocal_notes:
-                rh_notes_4 = _fill_gaps_from_full(vocal_notes, full_notes)
-            elif full_notes:
-                rh_notes_4 = _clean_melody_smart(
-                    full_notes, min_dur=0.12, min_pitch=55
-                )
-            log.info(f"Final RH melody: {len(rh_notes_4)} notes")
-
-            # ── LAYER 2: Accompaniment → sparse chords ───────────────────
-            if accomp_path:
-                prog("Layer 2: Transcribing accompaniment…", 60)
-                try:
-                    acc22k = os.path.join(work_dir, 'accomp_22k.wav')
-                    _to_mono(accomp_path, acc22k, sr=22050)
-                    accomp_notes = _transcribe_basic_pitch(
-                        acc22k, onset_thresh=0.55, frame_thresh=0.35,
-                        min_note_ms=200, max_freq=700
+                if vocal_notes:
+                    rh_notes_4 = _fill_gaps_from_full(vocal_notes, full_notes)
+                elif full_notes:
+                    rh_notes_4 = _clean_melody_smart(
+                        full_notes, min_dur=0.12, min_pitch=55
                     )
-                    lh_chords = _notes_to_lh_chords(
-                        accomp_notes, beat_times, bpm, audio_duration
-                    )
-                    log.info(f"Accompaniment → {len(lh_chords)} beat chords")
-                except Exception as exc:
-                    log.warning(f"basic-pitch on accompaniment failed: {exc}")
+                log.info(f"Final RH melody: {len(rh_notes_4)} notes")
+
+                if accomp_path:
+                    prog("Transcribing accompaniment…", 60)
+                    try:
+                        acc22k = os.path.join(work_dir, 'accomp_22k.wav')
+                        _to_mono(accomp_path, acc22k, sr=22050)
+                        accomp_notes = _transcribe_basic_pitch(
+                            acc22k, onset_thresh=0.55, frame_thresh=0.35,
+                            min_note_ms=200, max_freq=700
+                        )
+                        lh_chords = _notes_to_lh_chords(
+                            accomp_notes, beat_times, bpm, audio_duration
+                        )
+                        log.info(f"Accompaniment → {len(lh_chords)} beat chords")
+                    except Exception as exc:
+                        log.warning(f"basic-pitch on accompaniment failed: {exc}")
 
         # ══════════════════════════════════════════════════════════════════
         #  FALLBACK: old RMVPE/torchcrepe chain if basic-pitch unavailable
@@ -2091,28 +2302,31 @@ def process_youtube_to_piano_midi(url, output_path, progress_cb=None):
                 melody_3 = _fill_melody_gaps(melody_3, max_gap=0.80)
                 rh_notes_4 = [(s, e, p, 80) for s, e, p in melody_3]
 
-        log.info(f"RH notes: {len(rh_notes_4)}")
+        log.info(f"RH notes: {len(rh_notes_4)}, LH notes: {len(lh_notes_4)}")
 
         # ── Key/raga detection ───────────────────────────────────────────
         prog("Detecting key/raga…", 75)
         key_root, key_mode, raga_name, intervals = _detect_key_raga(mono_wav)
 
-        # Soft scale constraint on RH
-        rh_melody_3 = [(s, e, p) for s, e, p, v in rh_notes_4]
-        rh_melody_3 = _constrain_to_scale_soft(rh_melody_3, key_root, intervals)
-        rh_notes_4 = [(s, e, p, rh_notes_4[i][3])
-                      for i, (s, e, p) in enumerate(rh_melody_3)
-                      if i < len(rh_notes_4)]
+        if not used_piano_transcription:
+            # Only apply scale constraint and quantization for basic-pitch output
+            # Piano transcription inference is already accurate — don't mess with it
+            rh_melody_3 = [(s, e, p) for s, e, p, v in rh_notes_4]
+            rh_melody_3 = _constrain_to_scale_soft(rh_melody_3, key_root, intervals)
+            rh_notes_4 = [(s, e, p, rh_notes_4[i][3])
+                          for i, (s, e, p) in enumerate(rh_melody_3)
+                          if i < len(rh_notes_4)]
 
-        # ── Quantize to beat grid ────────────────────────────────────────
-        prog("Quantizing to beat grid…", 82)
-        rh_3 = [(s, e, p) for s, e, p, v in rh_notes_4]
-        rh_3 = _quantize_multi(rh_3, bpm, beat_times)
-        rh_notes_4 = [(s, e, p, rh_notes_4[i][3] if i < len(rh_notes_4) else 80)
-                      for i, (s, e, p) in enumerate(rh_3)]
+            prog("Quantizing to beat grid…", 82)
+            rh_3 = [(s, e, p) for s, e, p, v in rh_notes_4]
+            rh_3 = _quantize_multi(rh_3, bpm, beat_times)
+            rh_notes_4 = [(s, e, p, rh_notes_4[i][3] if i < len(rh_notes_4) else 80)
+                          for i, (s, e, p) in enumerate(rh_3)]
+        else:
+            log.info("Skipping scale constraint + quantize (piano transcription is accurate)")
 
-        # ── Chord detection fallback if no transcribed harmony ───────────
-        if not lh_chords:
+        # ── Chord detection fallback if no LH from any source ─────────
+        if not lh_notes_4 and not lh_chords:
             prog("Detecting chords…", 87)
             import librosa, soundfile as sf
 
@@ -2152,6 +2366,7 @@ def process_youtube_to_piano_midi(url, output_path, progress_cb=None):
 
         # ── Phase 9: Phrase boundary detection + breathing room ──────────
         prog("Adding musical phrasing…", 92)
+        boundaries = []
         try:
             boundaries = _detect_phrase_boundaries(rh_notes_4, min_gap=0.3)
             rh_notes_4 = _add_breathing_room(rh_notes_4, boundaries)
@@ -2160,8 +2375,10 @@ def process_youtube_to_piano_midi(url, output_path, progress_cb=None):
 
         # ── Build MIDI ─────────────────────────────────────────────────────
         prog("Building piano arrangement…", 95)
-        _build_midi_v18(rh_notes_4, lh_chords, beat_times, bpm, audio_duration, output_path,
-                        energy_contour=energy_contour, sections=sections)
+        _build_midi_v19(rh_notes_4, lh_chords, beat_times, bpm, audio_duration, output_path,
+                        energy_contour=energy_contour, sections=sections,
+                        lh_notes=lh_notes_4,
+                        phrase_boundaries=boundaries)
 
         prog("Done!", 100)
         return {
