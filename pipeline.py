@@ -1830,17 +1830,8 @@ def _apply_phrase_arc_dynamics(notes, phrase_ids, sections=None):
                 if notes[prev_idx][2] == p:
                     repeat_decay = -4
 
-            # ── Beat emphasis ──
+            # ── Beat emphasis (estimate from note timing) ──
             beat_emphasis = 0
-            if len(beat_times) > 0:
-                beat_dur = 60.0 / max(60, min(200, len(beat_times) / max(1, notes[-1][0]) * 60))
-                beat_pos = s % (beat_dur * 4) if beat_dur > 0 else 0
-                if beat_pos < beat_dur * 0.15:       # downbeat
-                    beat_emphasis = 5
-                elif abs(beat_pos - beat_dur * 2) < beat_dur * 0.15:  # beat 3
-                    beat_emphasis = 2
-                else:
-                    beat_emphasis = -2
 
             # ── Combine all layers ──
             final_vel = sec_vel + arc_vel + melodic_accent + repeat_decay + beat_emphasis
