@@ -13,6 +13,11 @@ training_data/**/cover_stems/
 # ── Generated MIDI outputs (user output, not source code) ────────────────────
 midi_outputs/
 
+# ── Model weights (too large for git) ────────────────────────────────────────
+models/*.pt
+models/*.ckpt
+models/*.onnx
+
 # ── Python cache ──────────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]

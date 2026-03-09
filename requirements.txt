@@ -1,8 +1,11 @@
 flask>=2.3
 yt-dlp>=2024.1
-basic-pitch>=0.3.0
 pretty_midi>=0.2.9
 numpy>=1.24
 librosa>=0.10
 soundfile>=0.12
 demucs>=4.0
+torchcrepe>=0.0.20
+transformers>=4.30
+essentia>=2.1b6
+setuptools<81
