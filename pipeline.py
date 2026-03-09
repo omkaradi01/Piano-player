@@ -1487,55 +1487,292 @@ def _apply_energy_dynamics(rh_notes, energy_contour):
 
 
 # ─────────────────────────────────────────────
+#  Phase 9: Context-Aware Intelligence
+# ─────────────────────────────────────────────
+
+def _detect_song_sections(audio_path, beat_times, vocals_path=None):
+    """
+    Detect song sections (intro, verse, chorus, instrumental, outro)
+    using energy contour + vocal presence analysis.
+
+    Returns list of dicts:
+      [{'start': float, 'end': float, 'type': str, 'energy': float}, ...]
+    """
+    import librosa
+
+    try:
+        y, sr = librosa.load(audio_path, sr=22050, mono=True)
+        audio_duration = len(y) / sr
+
+        # Compute RMS energy in ~2-second windows
+        window_sec = 2.0
+        hop = int(window_sec * sr)
+        energies = []
+        for i in range(0, len(y), hop):
+            chunk = y[i:i + hop]
+            rms = float(np.sqrt(np.mean(chunk ** 2))) if len(chunk) > 0 else 0.0
+            t = i / sr
+            energies.append((t, rms))
+
+        # Normalize energy to 0-1
+        peak_energy = max(e for _, e in energies) if energies else 1.0
+        if peak_energy > 0:
+            energies = [(t, e / peak_energy) for t, e in energies]
+
+        # Compute vocal energy if vocal stem available
+        vocal_energies = []
+        if vocals_path and os.path.exists(vocals_path):
+            try:
+                yv, srv = librosa.load(vocals_path, sr=22050, mono=True)
+                vocal_peak = float(np.sqrt(np.mean(yv ** 2))) if len(yv) > 0 else 0.0
+                for i in range(0, len(yv), hop):
+                    chunk = yv[i:i + hop]
+                    rms = float(np.sqrt(np.mean(chunk ** 2))) if len(chunk) > 0 else 0.0
+                    t = i / sr
+                    # Vocal presence: vocal RMS > 0.05 of vocal peak
+                    has_vocal = rms > (vocal_peak * 0.05) if vocal_peak > 0 else False
+                    vocal_energies.append((t, rms, has_vocal))
+            except Exception as exc:
+                log.warning(f"Vocal energy analysis failed: {exc}")
+
+        # Build sections from energy + vocal presence
+        sections = []
+        for idx, (t, energy) in enumerate(energies):
+            t_end = t + window_sec
+            if idx + 1 < len(energies):
+                t_end = energies[idx + 1][0]
+            else:
+                t_end = min(t + window_sec, audio_duration)
+
+            # Determine vocal presence for this window
+            has_vocal = False
+            if vocal_energies:
+                for vt, vrms, vp in vocal_energies:
+                    if abs(vt - t) < window_sec:
+                        has_vocal = vp
+                        break
+
+            # Classify section type
+            if has_vocal and energy > 0.55:
+                section_type = 'chorus'
+            elif has_vocal and energy > 0.15:
+                section_type = 'verse'
+            elif not has_vocal and energy > 0.15:
+                section_type = 'instrumental'
+            else:
+                section_type = 'instrumental'  # low energy, no vocals
+
+            sections.append({
+                'start': t,
+                'end': t_end,
+                'type': section_type,
+                'energy': energy,
+            })
+
+        # Post-process: mark intro and outro
+        if sections:
+            # First section(s) with low energy → intro
+            for s in sections:
+                if s['energy'] < 0.25:
+                    s['type'] = 'intro'
+                else:
+                    break
+
+            # Last section(s) with declining energy → outro
+            for s in reversed(sections):
+                if s['energy'] < 0.25:
+                    s['type'] = 'outro'
+                else:
+                    break
+
+        # Merge consecutive sections of the same type
+        merged = []
+        for s in sections:
+            if merged and merged[-1]['type'] == s['type']:
+                merged[-1]['end'] = s['end']
+                merged[-1]['energy'] = max(merged[-1]['energy'], s['energy'])
+            else:
+                merged.append(dict(s))
+
+        log.info(f"Song sections: {len(merged)} sections detected: "
+                 f"{[s['type'] for s in merged]}")
+        return merged
+
+    except Exception as exc:
+        log.warning(f"Song section detection failed: {exc}")
+        return []
+
+
+def _get_section_at_time(sections, t):
+    """Return the section dict at time t, or None."""
+    for s in sections:
+        if s['start'] <= t < s['end']:
+            return s
+    return None
+
+
+def _detect_phrase_boundaries(melody_notes, min_gap=0.3):
+    """
+    Find phrase boundaries: gaps > min_gap seconds between consecutive melody notes.
+    Returns list of boundary times.
+    """
+    if not melody_notes or len(melody_notes) < 2:
+        return []
+
+    sorted_notes = sorted(melody_notes, key=lambda n: n[0])
+    boundaries = []
+    for i in range(len(sorted_notes) - 1):
+        note_end = sorted_notes[i][1]
+        next_start = sorted_notes[i + 1][0]
+        gap = next_start - note_end
+        if gap > min_gap:
+            boundaries.append(next_start)
+
+    log.info(f"Phrase boundaries: {len(boundaries)} found (min_gap={min_gap}s)")
+    return boundaries
+
+
+def _add_breathing_room(melody_notes, phrase_boundaries, min_silence_ms=80):
+    """
+    At each phrase boundary, ensure at least min_silence_ms of silence.
+    Trims the note before the boundary if needed.
+    """
+    if not melody_notes or not phrase_boundaries:
+        return melody_notes
+
+    min_silence = min_silence_ms / 1000.0
+    trim_amount = 0.04  # 40ms breathing room trim
+
+    sorted_notes = sorted(melody_notes, key=lambda n: n[0])
+    boundary_set = set(phrase_boundaries)
+
+    result = []
+    for i, (s, e, p, v) in enumerate(sorted_notes):
+        # Check if next note starts at a phrase boundary
+        if i + 1 < len(sorted_notes):
+            next_start = sorted_notes[i + 1][0]
+            if next_start in boundary_set:
+                # Ensure gap of at least min_silence before boundary
+                max_end = next_start - min_silence
+                if e > max_end:
+                    e = max(s + 0.05, max_end)  # don't make note too short
+            else:
+                # Not a phrase boundary, but still trim slightly for breathing
+                # Only if note is very close to next
+                gap = next_start - e
+                if 0 < gap < trim_amount:
+                    e = e - trim_amount
+                    e = max(s + 0.05, e)
+
+        result.append((s, e, p, v))
+
+    log.info(f"Breathing room applied at {len(phrase_boundaries)} boundaries")
+    return result
+
+
+# ─────────────────────────────────────────────
 #  Main pipeline
 # ─────────────────────────────────────────────
 
 def _build_midi_v18(rh_notes, lh_chords, beat_times, bpm, audio_duration, output_path,
-                    energy_contour=None):
+                    energy_contour=None, sections=None):
     """
-    v18: Build MIDI from basic-pitch transcribed notes.
-    LH: Graceful sustained chords — play on chord changes + every 2-4 beats.
-    No rapid hammering. Block chords held until next chord change.
+    v18 + Phase 9: Build MIDI from basic-pitch transcribed notes.
+    LH: Section-adaptive chords with improved humanization.
+    - intro/outro: LH off (melody only)
+    - verse: LH on chord changes only, low velocity
+    - chorus: full LH pattern, moderate velocity
+    - instrumental: root-fifth pattern, moderate velocity
+    Fixes chord overlap and robotic feel.
     """
     midi = pretty_midi.PrettyMIDI(initial_tempo=bpm)
     rh = pretty_midi.Instrument(program=0, name='RightHand')
     lh = pretty_midi.Instrument(program=0, name='LeftHand')
     rng = random.Random(42)
     beat_dur = 60.0 / bpm
-    log.info(f"v18 MIDI build: RH={len(rh_notes)} notes, bpm={bpm:.0f}")
+    log.info(f"v18 MIDI build: RH={len(rh_notes)} notes, bpm={bpm:.0f}, "
+             f"sections={'yes' if sections else 'no'}")
 
-    # ── Right hand: use actual transcribed notes with light humanization ──
-    for note_data in rh_notes:
+    # ── Compute note density for staccato variation ──
+    # Count notes in local 2-second windows
+    def _local_density(t, window=2.0):
+        count = 0
+        for ns, ne, np_, nv in rh_notes:
+            if abs(ns - t) < window:
+                count += 1
+        return count
+
+    # ── Right hand: improved humanization (Phase 9) ──────────────────────
+    for idx, note_data in enumerate(rh_notes):
         s, e, p, v = note_data
         p = max(21, min(108, p))
         dur = max(0.05, e - s)
-        off = rng.uniform(-0.008, 0.008)
-        vel = max(40, min(110, v + rng.randint(-8, 8)))
+
+        # Phase 9: Enhanced humanization
+        # Velocity variation ±12 (was ±8)
+        vel = max(40, min(110, v + rng.randint(-12, 12)))
+
+        # Timing variation ±15ms (was ±8ms)
+        off = rng.uniform(-0.015, 0.015)
+
+        # Tempo rubato: strong beats slightly early, weak beats slightly late
+        if len(beat_times) > 0:
+            beat_arr = np.asarray(beat_times, dtype=float)
+            nearest_idx = int(np.argmin(np.abs(beat_arr - s)))
+            dist_to_beat = abs(s - float(beat_arr[nearest_idx]))
+            if dist_to_beat < beat_dur * 0.1:
+                # On a strong beat: slightly early
+                off += -0.010
+            elif dist_to_beat > beat_dur * 0.35:
+                # Off-beat / weak beat: slightly late
+                off += 0.010
+
+        # Staccato variation in dense passages
+        density = _local_density(s)
+        if density > 8:
+            # High density: shorten some notes for staccato feel
+            dur *= rng.uniform(0.70, 0.90)
+        elif density > 5:
+            dur *= rng.uniform(0.85, 1.0)
+
         rh.notes.append(pretty_midi.Note(
             velocity=vel, pitch=p,
             start=max(0.0, s + off),
             end=max(0.0, s + off + dur),
         ))
 
-    # ── Left hand: graceful sustained chords ──────────────────────────────
-    # Strategy: Only play when chord CHANGES or every N beats (breathing room)
-    # Hold each chord until the next one starts — no rapid alternation
+    # ── Build a quick lookup: RH notes active at a given time ──
+    def _min_rh_pitch_at(t, window=0.1):
+        """Find the lowest RH pitch active near time t."""
+        min_p = 999
+        for ns, ne, np_, nv in rh_notes:
+            if ns - window <= t <= ne + window:
+                min_p = min(min_p, np_)
+        return min_p if min_p < 999 else None
+
+    def _rh_active_at(t, window=0.1):
+        """Check if any RH note is active near time t."""
+        for ns, ne, np_, nv in rh_notes:
+            if ns - window <= t <= ne + window:
+                return True
+        return False
+
+    # ── Left hand: section-adaptive chords (Phase 9) ─────────────────────
     prev_voicing = None
     prev_chord_name = None
 
-    # Determine how often to re-strike if chord doesn't change
-    # Slow songs: every 4 beats, medium: every 2 beats, fast: every beat
+    # Default restrike / style based on tempo
     if bpm < 80:
-        restrike_interval = 4
-        lh_style = 'sustained'  # whole notes
+        default_restrike = 4
+        default_style = 'sustained'
     elif bpm < 130:
-        restrike_interval = 2
-        lh_style = 'bass_chord'  # bass on 1, chord on 3
+        default_restrike = 2
+        default_style = 'bass_chord'
     else:
-        restrike_interval = 2
-        lh_style = 'broken'  # gentle broken chord
+        default_restrike = 2
+        default_style = 'broken'
 
-    log.info(f"LH style: {lh_style}, restrike every {restrike_interval} beats")
+    log.info(f"LH default style: {default_style}, restrike every {default_restrike} beats")
 
     i = 0
     while i < len(beat_times) and i < len(lh_chords):
@@ -1546,7 +1783,39 @@ def _build_midi_v18(rh_notes, lh_chords, beat_times, bpm, audio_duration, output
         chord_name, chord_notes = lh_chords[i]
         chord_changed = (chord_name != prev_chord_name)
 
-        # Energy-aware: skip LH in very quiet sections (intros, outros, soft passages)
+        # ── Phase 9: Section-aware LH behavior ──
+        section = _get_section_at_time(sections, bt) if sections else None
+        section_type = section['type'] if section else 'chorus'  # default to chorus behavior
+
+        # intro/outro: LH off entirely
+        if section_type in ('intro', 'outro'):
+            prev_chord_name = chord_name
+            i += 1
+            continue
+
+        # Determine style and velocity based on section
+        if section_type == 'verse':
+            lh_style = 'sustained'  # chord changes only, no restrike
+            restrike_interval = 999  # effectively no restrike
+            vel_lo, vel_hi = 35, 42
+            play_on_change_only = True
+        elif section_type == 'chorus':
+            lh_style = default_style
+            restrike_interval = default_restrike
+            vel_lo, vel_hi = 42, 55
+            play_on_change_only = False
+        elif section_type == 'instrumental':
+            lh_style = 'root_fifth'
+            restrike_interval = default_restrike
+            vel_lo, vel_hi = 38, 50
+            play_on_change_only = False
+        else:
+            lh_style = default_style
+            restrike_interval = default_restrike
+            vel_lo, vel_hi = 42, 55
+            play_on_change_only = False
+
+        # Energy-aware: skip LH in very quiet sections
         local_energy = _get_energy_at_time(energy_contour, bt) if energy_contour else 0.6
         if local_energy < 0.15 and not chord_changed:
             prev_chord_name = chord_name
@@ -1554,6 +1823,10 @@ def _build_midi_v18(rh_notes, lh_chords, beat_times, bpm, audio_duration, output
             continue
 
         # Only play on chord changes OR at restrike intervals
+        if play_on_change_only and not chord_changed:
+            prev_chord_name = chord_name
+            i += 1
+            continue
         if not chord_changed and (i % restrike_interval != 0):
             prev_chord_name = chord_name
             i += 1
@@ -1569,7 +1842,27 @@ def _build_midi_v18(rh_notes, lh_chords, beat_times, bpm, audio_duration, output
         voicing = _choose_voicing(chord_notes, prev_voicing)
         prev_voicing = voicing
 
-        # Find how long to hold: until next chord change or next restrike
+        # ── Phase 9: Fix chord overlap — ensure LH max pitch is at least
+        #    7 semitones below lowest concurrent RH note ──
+        min_rh = _min_rh_pitch_at(bt)
+        if min_rh is not None:
+            max_lh_allowed = min_rh - 7
+            voicing = [p for p in voicing if p <= max_lh_allowed]
+            if not voicing:
+                # All voicing notes too high — transpose down an octave
+                voicing = _choose_voicing(chord_notes, prev_voicing)
+                voicing = [max(24, p - 12) for p in voicing]
+                voicing = [p for p in voicing if p <= max_lh_allowed] or [max(24, max_lh_allowed - 7)]
+
+        if not voicing:
+            i += 1
+            continue
+
+        # ── Phase 9: Reduce LH velocity when RH is active ──
+        rh_playing = _rh_active_at(bt)
+        vel_reduction = 0.85 if rh_playing else 1.0  # 15% reduction when RH active
+
+        # Find how long to hold
         hold_end = bt + beat_dur * restrike_interval
         for j in range(i + 1, min(i + restrike_interval + 1, len(lh_chords))):
             if j < len(beat_times):
@@ -1584,54 +1877,81 @@ def _build_midi_v18(rh_notes, lh_chords, beat_times, bpm, audio_duration, output
             continue
 
         if lh_style == 'sustained':
-            # Block chord: all notes together, held long
             for p in voicing:
                 p = max(36, min(67, p))
                 off = rng.uniform(-0.006, 0.006)
+                raw_vel = rng.randint(vel_lo, vel_hi)
+                final_vel = max(25, int(raw_vel * vel_reduction))
                 lh.notes.append(pretty_midi.Note(
-                    velocity=rng.randint(38, 52),
-                    pitch=p,
+                    velocity=final_vel, pitch=p,
                     start=max(0.0, bt + off),
                     end=max(0.0, bt + hold_dur - 0.03),
                 ))
 
         elif lh_style == 'bass_chord':
-            # Beat 1: bass note alone (strong)
             bass = max(36, min(55, voicing[0]))
             off = rng.uniform(-0.008, 0.008)
+            raw_vel = rng.randint(vel_lo, vel_hi)
+            final_vel = max(25, int(raw_vel * vel_reduction))
             lh.notes.append(pretty_midi.Note(
-                velocity=rng.randint(48, 62),
-                pitch=bass,
+                velocity=final_vel, pitch=bass,
                 start=max(0.0, bt + off),
                 end=max(0.0, bt + hold_dur - 0.03),
             ))
-            # Beat 2 (or 1.5): upper chord notes together (softer)
             chord_time = bt + beat_dur * 0.95
-            if chord_time < hold_end - 0.1:
+            if chord_time < hold_end - 0.1 and len(voicing) > 1:
                 for p in voicing[1:]:
                     p = max(48, min(67, p))
                     off2 = rng.uniform(-0.005, 0.005)
+                    softer_vel = max(25, int(rng.randint(max(25, vel_lo - 5), vel_hi - 5) * vel_reduction))
                     lh.notes.append(pretty_midi.Note(
-                        velocity=rng.randint(35, 48),
-                        pitch=p,
+                        velocity=softer_vel, pitch=p,
                         start=max(0.0, chord_time + off2),
                         end=max(0.0, chord_time + (hold_dur - beat_dur) - 0.03),
                     ))
 
+        elif lh_style == 'root_fifth':
+            # Root-fifth pattern for instrumental sections
+            bass = max(36, min(55, voicing[0]))
+            off = rng.uniform(-0.010, 0.010)
+            raw_vel = rng.randint(vel_lo, vel_hi)
+            final_vel = max(25, int(raw_vel * vel_reduction))
+            note_dur = min(beat_dur * 0.80, hold_dur - 0.02)
+            lh.notes.append(pretty_midi.Note(
+                velocity=final_vel, pitch=bass,
+                start=max(0.0, bt + off),
+                end=max(0.0, bt + off + note_dur),
+            ))
+            # Fifth on the and-beat
+            t2 = bt + beat_dur * 0.5
+            fifth = bass + 7
+            if fifth > 60:
+                fifth -= 12
+            if t2 < audio_duration and hold_dur > beat_dur * 0.6:
+                off2 = rng.uniform(-0.010, 0.010)
+                softer_vel = max(25, int(rng.randint(max(25, vel_lo - 3), vel_hi - 3) * vel_reduction))
+                lh.notes.append(pretty_midi.Note(
+                    velocity=softer_vel,
+                    pitch=max(36, min(60, fifth)),
+                    start=max(0.0, t2 + off2),
+                    end=max(0.0, t2 + off2 + note_dur * 0.6),
+                ))
+
         else:  # broken — gentle arpeggio over 1 beat, then sustain
-            step = beat_dur / len(voicing)
+            step = beat_dur / len(voicing) if voicing else beat_dur
             for j, p in enumerate(voicing):
                 p = max(36, min(67, p))
-                t_start = bt + j * step * 0.3  # slight spread, not full beat
+                t_start = bt + j * step * 0.3
                 off = rng.uniform(-0.005, 0.005)
+                raw_vel = rng.randint(vel_lo, vel_hi)
+                final_vel = max(25, int(raw_vel * vel_reduction))
                 lh.notes.append(pretty_midi.Note(
-                    velocity=rng.randint(38, 52),
-                    pitch=p,
+                    velocity=final_vel, pitch=p,
                     start=max(0.0, t_start + off),
                     end=max(0.0, bt + hold_dur - 0.03),
                 ))
 
-        # Sustain pedal: press on chord, release slightly before next
+        # Sustain pedal
         lh.control_changes.append(pretty_midi.ControlChange(64, 127, max(0.0, bt)))
         lh.control_changes.append(
             pretty_midi.ControlChange(64, 0, max(0.0, hold_end - 0.06)))
@@ -1812,7 +2132,7 @@ def process_youtube_to_piano_midi(url, output_path, progress_cb=None):
             lh_chords = _detect_chords(chord_src, beat_times, bpm, audio_duration)
 
         # ── Energy contour for context-aware dynamics ──────────────────────
-        prog("Analyzing dynamics…", 90)
+        prog("Analyzing dynamics…", 88)
         try:
             energy_contour = _compute_energy_contour(mono_wav, hop_sec=0.5)
             rh_notes_4 = _apply_energy_dynamics(rh_notes_4, energy_contour)
@@ -1821,13 +2141,36 @@ def process_youtube_to_piano_midi(url, output_path, progress_cb=None):
             log.warning(f"Energy contour failed: {exc}")
             energy_contour = None
 
+        # ── Phase 9: Song section detection ──────────────────────────────
+        prog("Detecting song sections…", 90)
+        sections = []
+        try:
+            sections = _detect_song_sections(mono_wav, beat_times, vocals_path)
+        except Exception as exc:
+            log.warning(f"Section detection failed (non-fatal): {exc}")
+            sections = []
+
+        # ── Phase 9: Phrase boundary detection + breathing room ──────────
+        prog("Adding musical phrasing…", 92)
+        try:
+            boundaries = _detect_phrase_boundaries(rh_notes_4, min_gap=0.3)
+            rh_notes_4 = _add_breathing_room(rh_notes_4, boundaries)
+        except Exception as exc:
+            log.warning(f"Phrase boundary processing failed (non-fatal): {exc}")
+
         # ── Build MIDI ─────────────────────────────────────────────────────
         prog("Building piano arrangement…", 95)
         _build_midi_v18(rh_notes_4, lh_chords, beat_times, bpm, audio_duration, output_path,
-                        energy_contour=energy_contour)
+                        energy_contour=energy_contour, sections=sections)
 
         prog("Done!", 100)
-        return output_path
+        return {
+            'midi_path': output_path,
+            'sections': sections,
+            'bpm': bpm,
+            'duration': audio_duration,
+            'key': f"{NOTE_NAMES[key_root]} {key_mode}",
+        }
 
     except Exception as e:
         log.error(f"Pipeline error: {e}")

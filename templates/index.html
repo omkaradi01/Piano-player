@@ -3,646 +3,1201 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>🎹 Piano Transcriber</title>
+<title>Piano Transcriber</title>
 
-<!-- Tone.js (audio engine + Salamander Grand Piano samples) -->
+<!-- Tone.js + MIDI parser -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.js"></script>
-<!-- @tonejs/midi  — MIDI file parser -->
 <script src="https://cdn.jsdelivr.net/npm/@tonejs/midi@2.0.28/build/Midi.js"></script>
 
+<!-- Fonts -->
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,600;0,700;1,400&family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&display=swap" rel="stylesheet" />
+
 <style>
-/* ── Reset & base ──────────────────────────────────────────────────────── */
+/* ══════════════════════════════════════════════════════════════════════════════
+   RESET & TOKENS
+   ══════════════════════════════════════════════════════════════════════════════ */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
 :root {
-  --bg:       #0f1117;
-  --surface:  #1a1d27;
-  --card:     #22263a;
-  --accent:   #7c6af7;
-  --accent2:  #4fd1c5;
-  --text:     #e8eaf6;
-  --muted:    #7986a8;
-  --error:    #fc8181;
-  --success:  #68d391;
-  --white-key:#f0f0f0;
-  --black-key:#1a1a2e;
-  --key-active: #7c6af7;
-  --radius: 12px;
+  /* Base palette — deep midnight */
+  --bg:          #06070d;
+  --bg-raised:   #0d0f18;
+  --surface:     #141722;
+  --surface-2:   #1a1e2e;
+  --surface-3:   #222840;
+  --border:      rgba(255,255,255,0.06);
+  --border-focus:rgba(212,165,116,0.4);
+
+  /* Accent — warm amber stage light */
+  --gold:        #d4a574;
+  --gold-dim:    #a07a4f;
+  --gold-glow:   rgba(212,165,116,0.15);
+
+  /* Secondary — cool steel */
+  --blue:        #5b8abf;
+  --blue-dim:    #3d6590;
+  --blue-glow:   rgba(91,138,191,0.15);
+
+  /* Semantic */
+  --text:        #e2ddd5;
+  --text-muted:  #7a7568;
+  --text-dim:    #4a4640;
+  --error:       #c45c5c;
+  --success:     #5caa6c;
+
+  /* Section colors */
+  --sec-intro:   #4a6670;
+  --sec-verse:   #5b7a5c;
+  --sec-chorus:  #a07a4f;
+  --sec-inst:    #6a5a8a;
+  --sec-outro:   #4a6670;
+
+  /* Spacing */
+  --r:  8px;
+  --r2: 12px;
+  --r3: 16px;
 }
-html { font-size: 16px; }
+
+html { font-size: 16px; -webkit-font-smoothing: antialiased; }
+
 body {
   background: var(--bg);
   color: var(--text);
-  font-family: 'Segoe UI', system-ui, sans-serif;
+  font-family: 'DM Sans', system-ui, sans-serif;
   min-height: 100vh;
   overflow-x: hidden;
 }
 
-/* ── Layout ───────────────────────────────────────────────────────────── */
-.page { max-width: 860px; margin: 0 auto; padding: 2rem 1.5rem 4rem; }
-
-header { text-align: center; margin-bottom: 2.5rem; }
-header h1 { font-size: 2.4rem; font-weight: 800; letter-spacing: -0.5px; }
-header h1 span { color: var(--accent); }
-header p  { color: var(--muted); margin-top: .4rem; font-size: 1rem; }
-
-/* ── Input card ───────────────────────────────────────────────────────── */
-.card {
-  background: var(--card);
-  border-radius: var(--radius);
-  padding: 1.6rem;
-  margin-bottom: 1.4rem;
+/* Noise grain overlay */
+body::before {
+  content: '';
+  position: fixed; inset: 0;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.03'/%3E%3C/svg%3E");
+  background-size: 256px;
+  pointer-events: none;
+  z-index: 9999;
 }
-.card h2 { font-size: 1rem; color: var(--muted); font-weight: 600;
-           text-transform: uppercase; letter-spacing: .08em; margin-bottom: .9rem; }
 
-.url-row { display: flex; gap: .7rem; }
-.url-row input {
+/* ══════════════════════════════════════════════════════════════════════════════
+   LAYOUT
+   ══════════════════════════════════════════════════════════════════════════════ */
+.app {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+.app-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1rem 1.5rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-raised);
+}
+
+.logo {
+  font-family: 'Cormorant Garamond', Georgia, serif;
+  font-size: 1.4rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--text);
+}
+.logo span { color: var(--gold); }
+
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.mode-toggle {
+  display: flex;
+  background: var(--surface);
+  border-radius: var(--r);
+  padding: 3px;
+  gap: 2px;
+}
+.mode-btn {
+  padding: 0.35rem 0.75rem;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.mode-btn.active {
+  background: var(--surface-3);
+  color: var(--gold);
+}
+
+/* ── Input bar ────────────────────────────────────────────────────────── */
+.input-bar {
+  display: flex;
+  gap: 0.6rem;
+  padding: 0.75rem 1.5rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-raised);
+}
+
+.input-bar input {
   flex: 1;
   background: var(--surface);
-  border: 1.5px solid transparent;
-  border-radius: 8px;
-  padding: .7rem 1rem;
+  border: 1.5px solid var(--border);
+  border-radius: var(--r);
+  padding: 0.6rem 1rem;
   color: var(--text);
-  font-size: .95rem;
+  font-size: 0.88rem;
+  font-family: inherit;
   outline: none;
-  transition: border-color .2s;
+  transition: border-color 0.2s;
 }
-.url-row input:focus { border-color: var(--accent); }
-.url-row input::placeholder { color: var(--muted); }
+.input-bar input:focus {
+  border-color: var(--border-focus);
+}
+.input-bar input::placeholder {
+  color: var(--text-dim);
+}
 
-button {
+.btn {
   cursor: pointer;
   border: none;
-  border-radius: 8px;
-  font-weight: 700;
-  font-size: .9rem;
-  padding: .7rem 1.4rem;
-  transition: opacity .15s, transform .1s;
+  border-radius: var(--r);
+  font-weight: 600;
+  font-size: 0.82rem;
+  font-family: inherit;
+  padding: 0.6rem 1.2rem;
+  transition: all 0.15s;
+  white-space: nowrap;
 }
-button:active { transform: scale(.97); }
-button:disabled { opacity: .45; cursor: not-allowed; }
+.btn:active { transform: scale(0.97); }
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
-.btn-primary { background: var(--accent); color: #fff; }
-.btn-primary:hover:not(:disabled) { opacity: .88; }
-.btn-outline { background: transparent; border: 1.5px solid var(--accent);
-               color: var(--accent); }
-.btn-outline:hover:not(:disabled) { background: var(--accent); color: #fff; }
-.btn-sm { padding: .45rem .9rem; font-size: .8rem; }
+.btn-gold {
+  background: var(--gold);
+  color: #0a0a0f;
+}
+.btn-gold:hover:not(:disabled) { background: #e0b080; }
 
-/* ── Progress ─────────────────────────────────────────────────────────── */
-#progress-section { display: none; }
+.btn-ghost {
+  background: transparent;
+  border: 1.5px solid var(--border);
+  color: var(--text-muted);
+}
+.btn-ghost:hover:not(:disabled) {
+  border-color: var(--gold-dim);
+  color: var(--gold);
+}
 
-.step-label { font-size: .9rem; color: var(--muted); margin-bottom: .55rem;
-              min-height: 1.3em; }
-.progress-bar-bg {
-  background: var(--surface);
+/* ── Main content area ────────────────────────────────────────────── */
+.main-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+
+/* ── Processing overlay ───────────────────────────────────────────── */
+.processing-overlay {
+  display: none;
+  position: absolute;
+  inset: 0;
+  background: rgba(6,7,13,0.92);
+  backdrop-filter: blur(8px);
+  z-index: 100;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1.5rem;
+}
+.processing-overlay.active { display: flex; }
+
+.proc-spinner {
+  width: 48px;
+  height: 48px;
+  border: 3px solid var(--surface-3);
+  border-top-color: var(--gold);
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.proc-step {
+  font-size: 0.9rem;
+  color: var(--text-muted);
+  text-align: center;
+  max-width: 320px;
+}
+
+.proc-bar-wrap {
+  width: 280px;
+  height: 4px;
+  background: var(--surface-2);
   border-radius: 99px;
-  height: 8px;
   overflow: hidden;
 }
-.progress-bar-fill {
+.proc-bar-fill {
   height: 100%;
-  background: linear-gradient(90deg, var(--accent), var(--accent2));
-  border-radius: 99px;
   width: 0%;
-  transition: width .4s ease;
-}
-
-/* ── Song metadata ────────────────────────────────────────────────────── */
-#meta-section { display: none; align-items: center; gap: 1rem; }
-#meta-thumb {
-  width: 72px; height: 54px; border-radius: 6px;
-  object-fit: cover; background: var(--surface);
-}
-#meta-title { font-weight: 700; font-size: 1rem; }
-#meta-duration { font-size: .8rem; color: var(--muted); margin-top: .2rem; }
-
-/* ── Player card ──────────────────────────────────────────────────────── */
-#player-section { display: none; }
-
-.transport-row {
-  display: flex; align-items: center; gap: .9rem; flex-wrap: wrap;
-  margin-bottom: 1rem;
-}
-.transport-row .time-display {
-  font-variant-numeric: tabular-nums;
-  font-size: .85rem;
-  color: var(--muted);
-  min-width: 80px;
-}
-.seek-bar {
-  flex: 1; min-width: 150px;
-  -webkit-appearance: none;
-  height: 5px;
+  background: linear-gradient(90deg, var(--gold-dim), var(--gold));
   border-radius: 99px;
-  background: var(--surface);
-  outline: none;
-  cursor: pointer;
-}
-.seek-bar::-webkit-slider-thumb {
-  -webkit-appearance: none;
-  width: 14px; height: 14px;
-  border-radius: 50%;
-  background: var(--accent);
-  cursor: pointer;
+  transition: width 0.4s ease;
 }
 
-.tempo-row {
-  display: flex; align-items: center; gap: .7rem;
-  font-size: .85rem; color: var(--muted);
-  margin-top: .6rem;
+/* ── Welcome state ────────────────────────────────────────────────── */
+.welcome-state {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  padding: 3rem;
 }
-.tempo-row input[type=range] {
-  -webkit-appearance: none;
-  width: 120px; height: 4px;
-  border-radius: 99px;
-  background: var(--surface);
-  outline: none;
-  cursor: pointer;
+.welcome-state h2 {
+  font-family: 'Cormorant Garamond', Georgia, serif;
+  font-size: 2rem;
+  font-weight: 600;
+  color: var(--text);
+  text-align: center;
 }
-.tempo-row input[type=range]::-webkit-slider-thumb {
-  -webkit-appearance: none;
-  width: 12px; height: 12px;
-  border-radius: 50%;
-  background: var(--accent2);
-  cursor: pointer;
+.welcome-state p {
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  text-align: center;
+  max-width: 420px;
+  line-height: 1.5;
 }
-#tempo-val { color: var(--accent2); font-weight: 700; min-width: 42px; }
-
-/* ── Piano keyboard ───────────────────────────────────────────────────── */
-#keyboard-wrap {
-  overflow-x: auto;
-  padding-bottom: .5rem;
+.welcome-keys {
   margin-top: 1rem;
-  scrollbar-width: thin;
-  scrollbar-color: var(--accent) var(--surface);
+  opacity: 0.15;
+  font-size: 3rem;
+  letter-spacing: 0.3rem;
+  font-family: 'Cormorant Garamond', serif;
+  color: var(--gold);
 }
+
+/* ── Player (hidden until MIDI loads) ─────────────────────────────── */
+.player-wrap {
+  display: none;
+  flex-direction: column;
+  flex: 1;
+}
+.player-wrap.active {
+  display: flex;
+}
+
+/* ── Section timeline ─────────────────────────────────────────────── */
+.section-timeline {
+  display: flex;
+  height: 24px;
+  background: var(--bg-raised);
+  border-bottom: 1px solid var(--border);
+  overflow: hidden;
+}
+.section-block {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.65rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: rgba(255,255,255,0.7);
+  position: relative;
+  overflow: hidden;
+}
+.section-block::after {
+  content: '';
+  position: absolute;
+  right: 0;
+  top: 2px;
+  bottom: 2px;
+  width: 1px;
+  background: rgba(0,0,0,0.3);
+}
+
+/* ── Piano roll ───────────────────────────────────────────────────── */
+.piano-roll-area {
+  flex: 1;
+  min-height: 300px;
+  position: relative;
+  background: var(--bg);
+  overflow: hidden;
+}
+
+#piano-roll-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/* ── Piano keyboard ───────────────────────────────────────────────── */
+.keyboard-area {
+  background: var(--bg-raised);
+  border-top: 1px solid var(--border);
+  padding: 0.5rem 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: var(--surface-3) transparent;
+}
+
 #keyboard-canvas {
   display: block;
   margin: 0 auto;
 }
 
-/* ── Activity feed ────────────────────────────────────────────────────── */
-#note-feed {
+/* ── Transport bar ────────────────────────────────────────────────── */
+.transport-bar {
   display: flex;
-  flex-wrap: wrap;
-  gap: .3rem;
-  min-height: 2rem;
-  margin-top: .8rem;
-}
-.note-chip {
-  background: var(--accent);
-  color: #fff;
-  border-radius: 4px;
-  padding: 2px 6px;
-  font-size: .7rem;
-  font-weight: 700;
-  animation: fadeChip .7s ease forwards;
-}
-@keyframes fadeChip {
-  0%   { opacity: 1; transform: translateY(0); }
-  80%  { opacity: .8; }
-  100% { opacity: 0; transform: translateY(-6px); }
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.65rem 1.5rem;
+  background: var(--bg-raised);
+  border-top: 1px solid var(--border);
 }
 
-/* ── Download row ─────────────────────────────────────────────────────── */
-#download-row { display: none; justify-content: flex-end; margin-top: .8rem; gap: .6rem; }
+.transport-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
 
-/* ── Error banner ─────────────────────────────────────────────────────── */
-#error-banner {
+.t-btn {
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: var(--r);
+  background: var(--surface);
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s;
+}
+.t-btn:hover { background: var(--surface-2); color: var(--text); }
+.t-btn.playing { background: var(--gold); color: #0a0a0f; }
+
+.time-display {
+  font-variant-numeric: tabular-nums;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+  min-width: 95px;
+}
+
+.seek-track {
+  flex: 1;
+  height: 6px;
+  background: var(--surface);
+  border-radius: 99px;
+  cursor: pointer;
+  position: relative;
+  overflow: hidden;
+}
+.seek-fill {
+  height: 100%;
+  width: 0%;
+  background: var(--gold);
+  border-radius: 99px;
+  transition: width 0.1s linear;
+  pointer-events: none;
+}
+.seek-track:hover .seek-fill { background: #e0b080; }
+
+.transport-right {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.vol-wrap {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+.vol-icon {
+  font-size: 0.8rem;
+  color: var(--text-dim);
+}
+.vol-slider {
+  -webkit-appearance: none;
+  width: 60px;
+  height: 3px;
+  border-radius: 99px;
+  background: var(--surface-2);
+  outline: none;
+  cursor: pointer;
+}
+.vol-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  cursor: pointer;
+}
+
+.dl-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.3rem 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  font-weight: 600;
+  font-family: inherit;
+  text-decoration: none;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.dl-btn:hover {
+  border-color: var(--gold-dim);
+  color: var(--gold);
+}
+
+/* Song info bar */
+.song-info-bar {
   display: none;
-  background: rgba(252,129,129,.12);
-  border: 1px solid var(--error);
-  border-radius: 8px;
-  padding: .8rem 1rem;
-  color: var(--error);
-  font-size: .88rem;
-  margin-top: .6rem;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.5rem 1.5rem;
+  background: var(--bg-raised);
+  border-bottom: 1px solid var(--border);
+  font-size: 0.82rem;
+}
+.song-info-bar.active { display: flex; }
+.song-title { color: var(--text); font-weight: 600; }
+.song-meta { color: var(--text-muted); }
+.song-meta span { color: var(--gold-dim); }
+
+/* ── Error toast ──────────────────────────────────────────────────── */
+.error-toast {
+  display: none;
+  position: fixed;
+  bottom: 1.5rem;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--error);
+  color: #fff;
+  padding: 0.6rem 1.2rem;
+  border-radius: var(--r);
+  font-size: 0.82rem;
+  font-weight: 600;
+  z-index: 200;
+  max-width: 90vw;
+  animation: toastIn 0.3s ease;
+}
+@keyframes toastIn {
+  from { opacity: 0; transform: translateX(-50%) translateY(10px); }
+  to   { opacity: 1; transform: translateX(-50%) translateY(0); }
 }
 
-/* ── Footer ───────────────────────────────────────────────────────────── */
-footer {
-  text-align: center;
-  color: var(--muted);
-  font-size: .78rem;
-  margin-top: 3rem;
-}
-footer a { color: var(--accent); text-decoration: none; }
-
-/* ── Responsive ───────────────────────────────────────────────────────── */
-@media (max-width: 520px) {
-  header h1 { font-size: 1.7rem; }
-  .transport-row { gap: .6rem; }
+/* ── Responsive ───────────────────────────────────────────────────── */
+@media (max-width: 640px) {
+  .app-header { padding: 0.75rem 1rem; }
+  .input-bar { padding: 0.6rem 1rem; }
+  .transport-bar { padding: 0.5rem 1rem; gap: 0.5rem; }
+  .logo { font-size: 1.1rem; }
+  .welcome-state h2 { font-size: 1.5rem; }
+  .transport-right .dl-btn span { display: none; }
 }
 </style>
 </head>
 <body>
-<div class="page">
+<div class="app">
 
   <!-- Header -->
-  <header>
-    <h1>🎹 <span>Piano</span> Transcriber</h1>
-    <p>Paste any YouTube song URL and hear it transformed into a professional piano rendition.</p>
-  </header>
-
-  <!-- Input card -->
-  <div class="card">
-    <h2>YouTube URL</h2>
-    <div class="url-row">
-      <input id="url-input" type="url"
-             placeholder="https://www.youtube.com/watch?v=…"
-             autocomplete="off" spellcheck="false" />
-      <button class="btn-primary" id="go-btn" onclick="startTranscription()">
-        Transcribe →
-      </button>
-    </div>
-    <div style="display:flex;align-items:center;gap:1rem;margin-top:.8rem;">
-      <label style="display:flex;align-items:center;gap:.4rem;cursor:pointer;font-size:.85rem;color:var(--muted);">
-        <input type="radio" name="mode" value="detailed" checked
-               style="accent-color:var(--accent);" />
-        <span><strong style="color:var(--text)">Detailed</strong> — Tamil-optimized, raga-aware</span>
-      </label>
-      <label style="display:flex;align-items:center;gap:.4rem;cursor:pointer;font-size:.85rem;color:var(--muted);">
-        <input type="radio" name="mode" value="quick"
-               style="accent-color:var(--accent2);" />
-        <span><strong style="color:var(--text)">Quick</strong> — Pop2Piano AI (faster)</span>
-      </label>
-    </div>
-    <div id="error-banner"></div>
-  </div>
-
-  <!-- Song metadata -->
-  <div class="card" id="meta-section" style="display:none">
-    <div style="display:flex;align-items:center;gap:1rem">
-      <img id="meta-thumb" src="" alt="thumbnail" />
-      <div>
-        <div id="meta-title"></div>
-        <div id="meta-duration"></div>
+  <div class="app-header">
+    <div class="logo"><span>Piano</span> Transcriber</div>
+    <div class="header-right">
+      <div class="mode-toggle">
+        <button class="mode-btn active" data-mode="detailed" onclick="setMode(this)">Detailed</button>
+        <button class="mode-btn" data-mode="quick" onclick="setMode(this)">Quick</button>
       </div>
     </div>
   </div>
 
-  <!-- Progress card -->
-  <div class="card" id="progress-section">
-    <h2>Processing</h2>
-    <div class="step-label" id="step-label">Starting…</div>
-    <div class="progress-bar-bg">
-      <div class="progress-bar-fill" id="progress-fill"></div>
-    </div>
+  <!-- Input bar -->
+  <div class="input-bar">
+    <input id="url-input" type="url" placeholder="Paste a YouTube URL and press Enter..."
+           autocomplete="off" spellcheck="false" />
+    <button class="btn btn-gold" id="go-btn" onclick="startTranscription()">Transcribe</button>
   </div>
 
-  <!-- Player card -->
-  <div class="card" id="player-section">
-    <h2>🎶 Piano Version</h2>
+  <!-- Song info (shown after processing) -->
+  <div class="song-info-bar" id="song-info">
+    <span class="song-title" id="song-title"></span>
+    <span class="song-meta" id="song-meta"></span>
+  </div>
 
-    <!-- Transport controls -->
-    <div class="transport-row">
-      <button class="btn-primary btn-sm" id="play-btn" onclick="togglePlay()">▶ Play</button>
-      <button class="btn-outline btn-sm" onclick="stopPlayback()">■ Stop</button>
-      <input type="range" class="seek-bar" id="seek-bar"
-             min="0" max="100" value="0" oninput="seek(this.value)" />
-      <span class="time-display" id="time-display">0:00 / 0:00</span>
+  <!-- Main content -->
+  <div class="main-content">
+
+    <!-- Processing overlay -->
+    <div class="processing-overlay" id="proc-overlay">
+      <div class="proc-spinner"></div>
+      <div class="proc-step" id="proc-step">Starting...</div>
+      <div class="proc-bar-wrap">
+        <div class="proc-bar-fill" id="proc-fill"></div>
+      </div>
     </div>
 
-    <!-- Tempo / speed control -->
-    <div class="tempo-row">
-      <span>Tempo:</span>
-      <input type="range" id="tempo-slider"
-             min="50" max="200" value="100" oninput="updateTempo(this.value)" />
-      <span id="tempo-val">100%</span>
-      <span style="margin-left:.4rem;color:var(--muted)">Volume:</span>
-      <input type="range" id="vol-slider"
-             min="0" max="100" value="80" oninput="updateVolume(this.value)" />
+    <!-- Welcome state -->
+    <div class="welcome-state" id="welcome">
+      <h2>Transform any song into piano</h2>
+      <p>Paste a YouTube URL above. The AI will separate vocals, detect melody, chords, and song structure to create an expressive piano arrangement.</p>
+      <div class="welcome-keys">C D E F G A B</div>
     </div>
 
-    <!-- Piano keyboard canvas -->
-    <div id="keyboard-wrap">
-      <canvas id="keyboard-canvas"></canvas>
+    <!-- Player (appears after transcription) -->
+    <div class="player-wrap" id="player">
+
+      <!-- Section timeline -->
+      <div class="section-timeline" id="section-timeline"></div>
+
+      <!-- Piano roll -->
+      <div class="piano-roll-area" id="roll-area">
+        <canvas id="piano-roll-canvas"></canvas>
+      </div>
+
+      <!-- Piano keyboard -->
+      <div class="keyboard-area">
+        <canvas id="keyboard-canvas"></canvas>
+      </div>
     </div>
 
-    <!-- Live note display -->
-    <div id="note-feed"></div>
+  </div>
 
-    <!-- Download -->
-    <div id="download-row">
-      <a id="dl-midi" href="#" class="btn-outline btn-sm"
-         style="display:inline-block;text-decoration:none;padding:.45rem .9rem;
-                font-weight:700;font-size:.8rem;border:1.5px solid var(--accent);
-                color:var(--accent);border-radius:8px;">
-        ⬇ Download MIDI
+  <!-- Transport bar -->
+  <div class="transport-bar" id="transport" style="display:none">
+    <div class="transport-controls">
+      <button class="t-btn" id="play-btn" onclick="togglePlay()" title="Play/Pause">
+        <svg id="play-icon" width="14" height="14" viewBox="0 0 14 14" fill="currentColor">
+          <polygon points="2,0 14,7 2,14" />
+        </svg>
+        <svg id="pause-icon" width="14" height="14" viewBox="0 0 14 14" fill="currentColor" style="display:none">
+          <rect x="1" y="0" width="4" height="14" />
+          <rect x="9" y="0" width="4" height="14" />
+        </svg>
+      </button>
+      <button class="t-btn" onclick="stopPlayback()" title="Stop">
+        <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor">
+          <rect x="1" y="1" width="10" height="10" rx="1" />
+        </svg>
+      </button>
+    </div>
+
+    <span class="time-display" id="time-display">0:00 / 0:00</span>
+
+    <div class="seek-track" id="seek-track" onclick="seekClick(event)">
+      <div class="seek-fill" id="seek-fill"></div>
+    </div>
+
+    <div class="transport-right">
+      <div class="vol-wrap">
+        <span class="vol-icon">&#9834;</span>
+        <input type="range" class="vol-slider" id="vol-slider" min="0" max="100" value="80"
+               oninput="updateVolume(this.value)" />
+      </div>
+      <a class="dl-btn" id="dl-midi" href="#" download="piano.mid">
+        MIDI
       </a>
-      <a id="dl-mp3" href="#" class="btn-outline btn-sm"
-         style="display:none;text-decoration:none;padding:.45rem .9rem;
-                font-weight:700;font-size:.8rem;border:1.5px solid var(--accent2);
-                color:var(--accent2);border-radius:8px;">
-        ⬇ Download MP3
+      <a class="dl-btn" id="dl-mp3" href="#" download="piano.mp3" style="display:none">
+        MP3
       </a>
     </div>
   </div>
 
 </div>
 
-<footer>
-  <p>Powered by <a href="https://spotify.github.io/basic-pitch/" target="_blank">Spotify basic-pitch</a>
-  · <a href="https://tonejs.github.io/" target="_blank">Tone.js</a>
-  · Salamander Grand Piano samples
-  · For personal / educational use only</p>
-</footer>
+<div class="error-toast" id="error-toast"></div>
 
-<!-- ═══════════════════════════════════════════════════════════════════════
-     JavaScript
-════════════════════════════════════════════════════════════════════════ -->
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     JAVASCRIPT
+     ═══════════════════════════════════════════════════════════════════════════ -->
 <script>
-// ── State ──────────────────────────────────────────────────────────────────
+// ── State ────────────────────────────────────────────────────────────────────
 let currentJobId   = null;
 let pollTimer      = null;
-let midiData       = null;   // parsed Midi object
+let midiData       = null;
 let totalDuration  = 0;
-let scheduledParts = [];
 let isPlaying      = false;
-let playStartTime  = 0;      // Tone.now() when play was pressed
-let tempoScale     = 1.0;
+let selectedMode   = 'detailed';
 let sampler        = null;
 let samplerReady   = false;
+let sections       = [];
+let songBpm        = 120;
+let songKey        = '';
+let animFrame      = null;
 
-// Active piano keys: Set of MIDI note numbers
-const activeKeys = new Set();
+// Active notes per track: { midi_number: { track: 'rh'|'lh', end: time } }
+const activeNotes  = new Map();
 
-// Piano dimensions
-const PIANO = {
-  startNote: 21,   // A0
-  endNote:   108,  // C8
-  whiteH:    110,
-  whiteW:    22,
-  blackH:    68,
-  blackW:    13,
+// Parsed note arrays for visualization
+let rhNotes = [];  // [{start, end, midi, vel}]
+let lhNotes = [];
+
+// Piano roll state
+const ROLL = {
+  pixPerSec: 80,     // horizontal zoom
+  noteH: 5,          // height per semitone
+  lowNote: 36,       // C2
+  highNote: 96,      // C7
+  scrollX: 0,
 };
 
-// ── Boot ───────────────────────────────────────────────────────────────────
-window.addEventListener("load", () => {
+// Keyboard
+const KB = {
+  startNote: 36,   // C2
+  endNote:   96,    // C7
+  whiteH: 72,
+  whiteW: 18,
+  blackH: 44,
+  blackW: 11,
+};
+
+// ── Boot ─────────────────────────────────────────────────────────────────────
+window.addEventListener('load', () => {
   buildKeyboard();
   initSampler();
+
+  document.getElementById('url-input').addEventListener('keydown', e => {
+    if (e.key === 'Enter') startTranscription();
+  });
+
+  // Resize handler
+  window.addEventListener('resize', () => {
+    buildKeyboard();
+    if (midiData) drawPianoRoll();
+  });
 });
 
-// ── Sampler (Salamander Grand Piano via Tone.js CDN) ───────────────────────
+// ── Sampler ──────────────────────────────────────────────────────────────────
 function initSampler() {
-  // Salamander Grand Piano — hosted on Tone.js GitHub Pages
   sampler = new Tone.Sampler({
     urls: {
-      A0: "A0.mp3", C1: "C1.mp3", "D#1": "Ds1.mp3", "F#1": "Fs1.mp3",
-      A1: "A1.mp3", C2: "C2.mp3", "D#2": "Ds2.mp3", "F#2": "Fs2.mp3",
-      A2: "A2.mp3", C3: "C3.mp3", "D#3": "Ds3.mp3", "F#3": "Fs3.mp3",
-      A3: "A3.mp3", C4: "C4.mp3", "D#4": "Ds4.mp3", "F#4": "Fs4.mp3",
-      A4: "A4.mp3", C5: "C5.mp3", "D#5": "Ds5.mp3", "F#5": "Fs5.mp3",
-      A5: "A5.mp3", C6: "C6.mp3", "D#6": "Ds6.mp3", "F#6": "Fs6.mp3",
-      A6: "A6.mp3", C7: "C7.mp3", "D#7": "Ds7.mp3", "F#7": "Fs7.mp3",
-      A7: "A7.mp3", C8: "C8.mp3",
+      A0:'A0.mp3', C1:'C1.mp3', 'D#1':'Ds1.mp3', 'F#1':'Fs1.mp3',
+      A1:'A1.mp3', C2:'C2.mp3', 'D#2':'Ds2.mp3', 'F#2':'Fs2.mp3',
+      A2:'A2.mp3', C3:'C3.mp3', 'D#3':'Ds3.mp3', 'F#3':'Fs3.mp3',
+      A3:'A3.mp3', C4:'C4.mp3', 'D#4':'Ds4.mp3', 'F#4':'Fs4.mp3',
+      A4:'A4.mp3', C5:'C5.mp3', 'D#5':'Ds5.mp3', 'F#5':'Fs5.mp3',
+      A5:'A5.mp3', C6:'C6.mp3', 'D#6':'Ds6.mp3', 'F#6':'Fs6.mp3',
+      A6:'A6.mp3', C7:'C7.mp3', 'D#7':'Ds7.mp3', 'F#7':'Fs7.mp3',
+      A7:'A7.mp3', C8:'C8.mp3',
     },
-    baseUrl: "https://tonejs.github.io/audio/salamander/",
-    onload:  () => { samplerReady = true; console.log("🎹 Piano samples loaded!"); },
-    onerror: (err) => console.warn("Sampler load error:", err),
+    baseUrl: 'https://tonejs.github.io/audio/salamander/',
+    onload:  () => { samplerReady = true; console.log('Piano samples loaded'); },
+    onerror: (e) => console.warn('Sampler error:', e),
   }).toDestination();
 
-  Tone.getDestination().volume.value = -4;  // slight headroom
+  Tone.getDestination().volume.value = -4;
 }
 
-// ── Transcription flow ─────────────────────────────────────────────────────
+// ── Mode toggle ──────────────────────────────────────────────────────────────
+function setMode(btn) {
+  document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  selectedMode = btn.dataset.mode;
+}
+
+// ── Transcription ────────────────────────────────────────────────────────────
 async function startTranscription() {
-  const url = document.getElementById("url-input").value.trim();
-  if (!url) { showError("Please paste a YouTube URL."); return; }
+  const url = document.getElementById('url-input').value.trim();
+  if (!url) { showError('Paste a YouTube URL first'); return; }
 
   clearError();
-  setUI("processing");
   stopPlayback();
+  setUI('processing');
 
-  const mode = document.querySelector('input[name="mode"]:checked')?.value || 'detailed';
   try {
-    const res = await fetch("/api/process", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url, mode }),
+    const res = await fetch('/api/process', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url, mode: selectedMode }),
     });
     const data = await res.json();
-    if (!res.ok) throw new Error(data.error || "Server error");
+    if (!res.ok) throw new Error(data.error || 'Server error');
 
     currentJobId = data.job_id;
-    pollTimer = setInterval(pollStatus, 1500);
-    fetchMetadata();
+    pollTimer = setInterval(pollStatus, 1200);
   } catch (err) {
     showError(err.message);
-    setUI("idle");
+    setUI('idle');
   }
 }
 
-async function fetchMetadata() {
-  await new Promise(r => setTimeout(r, 3000));  // wait for yt-dlp
-  try {
-    const res  = await fetch(`/api/info/${currentJobId}`);
-    const info = await res.json();
-    if (info.title) {
-      document.getElementById("meta-title").textContent = info.title;
-      document.getElementById("meta-duration").textContent =
-        "Duration: " + fmtTime(info.duration);
-      if (info.thumb)
-        document.getElementById("meta-thumb").src = info.thumb;
-      document.getElementById("meta-section").style.display = "block";
-    }
-  } catch (_) {}
-}
-
 async function pollStatus() {
+  if (!currentJobId) return;
   try {
     const res  = await fetch(`/api/status/${currentJobId}`);
     const data = await res.json();
 
-    document.getElementById("step-label").textContent = data.step || "…";
-    document.getElementById("progress-fill").style.width = (data.progress || 0) + "%";
+    document.getElementById('proc-step').textContent = data.step || data.message || '...';
+    document.getElementById('proc-fill').style.width = (data.progress || data.pct || 0) + '%';
 
-    if (data.status === "done") {
+    if (data.status === 'done') {
       clearInterval(pollTimer);
-      await loadAndPrepareMidi();
-    } else if (data.status === "error") {
+      await loadMidi();
+    } else if (data.status === 'error') {
       clearInterval(pollTimer);
-      showError("Processing failed: " + (data.error || "unknown error"));
-      setUI("idle");
+      showError(data.error || 'Processing failed');
+      setUI('idle');
     }
   } catch (_) {}
 }
 
-// ── MIDI loading ───────────────────────────────────────────────────────────
-async function loadAndPrepareMidi() {
+// ── MIDI loading + parsing ───────────────────────────────────────────────────
+async function loadMidi() {
   try {
-    const res  = await fetch(`/api/midi/${currentJobId}`);
-    const buf  = await res.arrayBuffer();
-
-    midiData = new Midi(buf);
+    // Fetch MIDI binary
+    const res = await fetch(`/api/midi/${currentJobId}`);
+    const buf = await res.arrayBuffer();
+    midiData  = new Midi(buf);
     totalDuration = midiData.duration;
 
-    setUI("player");
-    document.getElementById("dl-midi").href = `/api/midi/${currentJobId}`;
-    document.getElementById("dl-midi").download = "piano_version.mid";
+    // Parse into RH/LH note arrays
+    rhNotes = [];
+    lhNotes = [];
+    midiData.tracks.forEach(track => {
+      const isLH = (track.name || '').toLowerCase().includes('left');
+      track.notes.forEach(n => {
+        const obj = { start: n.time, end: n.time + n.duration, midi: n.midi,
+                      vel: n.velocity, name: n.name, duration: n.duration };
+        if (isLH) lhNotes.push(obj);
+        else       rhNotes.push(obj);
+      });
+    });
 
-    // Check if MP3 is available
+    // Load sections
     try {
-      const statusRes = await fetch(`/api/status/${currentJobId}`);
-      const statusData = await statusRes.json();
-      if (statusData.has_mp3) {
-        const mp3Link = document.getElementById("dl-mp3");
-        mp3Link.href = `/api/mp3/${currentJobId}`;
-        mp3Link.download = "piano_version.mp3";
-        mp3Link.style.display = "inline-block";
+      const sRes = await fetch(`/api/sections/${currentJobId}`);
+      const sData = await sRes.json();
+      sections = sData.sections || [];
+      songBpm  = sData.bpm || 120;
+      songKey  = sData.key || '';
+    } catch (_) { sections = []; }
+
+    // Check MP3 availability
+    try {
+      const stRes = await fetch(`/api/status/${currentJobId}`);
+      const stData = await stRes.json();
+      if (stData.has_mp3) {
+        const mp3 = document.getElementById('dl-mp3');
+        mp3.href = `/api/mp3/${currentJobId}`;
+        mp3.style.display = 'inline-flex';
       }
     } catch (_) {}
-    document.getElementById("time-display").textContent =
-      "0:00 / " + fmtTime(totalDuration);
 
-    // Wait for sampler before playing
+    // Setup UI
+    document.getElementById('dl-midi').href = `/api/midi/${currentJobId}`;
+
+    // Song info
+    const info = document.getElementById('song-info');
+    document.getElementById('song-title').textContent = `Piano Cover`;
+    const metaParts = [];
+    if (songBpm) metaParts.push(`<span>${Math.round(songBpm)} BPM</span>`);
+    if (songKey) metaParts.push(`<span>${songKey}</span>`);
+    metaParts.push(`${rhNotes.length} melody notes`);
+    metaParts.push(`${lhNotes.length} chord notes`);
+    if (sections.length) metaParts.push(`${sections.length} sections`);
+    document.getElementById('song-meta').innerHTML = metaParts.join(' &middot; ');
+
+    // Wait for sampler
     if (!samplerReady) {
-      document.getElementById("step-label").textContent =
-        "Loading piano samples… (first time only)";
+      document.getElementById('proc-step').textContent = 'Loading piano samples...';
       await Tone.loaded();
     }
+
+    setUI('player');
+    buildSectionTimeline();
+    drawPianoRoll();
     scheduleMidi();
+
   } catch (err) {
-    showError("Could not load MIDI: " + err.message);
-    setUI("idle");
+    showError('Could not load MIDI: ' + err.message);
+    setUI('idle');
   }
 }
 
-// ── Tone.js MIDI scheduling ────────────────────────────────────────────────
+// ── Section timeline ─────────────────────────────────────────────────────────
+function buildSectionTimeline() {
+  const el = document.getElementById('section-timeline');
+  el.innerHTML = '';
+
+  if (!sections.length || totalDuration <= 0) {
+    el.style.display = 'none';
+    return;
+  }
+  el.style.display = 'flex';
+
+  const colors = {
+    intro: 'var(--sec-intro)', verse: 'var(--sec-verse)',
+    chorus: 'var(--sec-chorus)', instrumental: 'var(--sec-inst)',
+    outro: 'var(--sec-outro)',
+  };
+
+  sections.forEach(sec => {
+    const pct = ((sec.end - sec.start) / totalDuration) * 100;
+    const block = document.createElement('div');
+    block.className = 'section-block';
+    block.style.width = pct + '%';
+    block.style.background = colors[sec.type] || 'var(--surface-2)';
+    block.textContent = sec.type;
+    block.title = `${sec.type} (${fmtTime(sec.start)} - ${fmtTime(sec.end)})`;
+    el.appendChild(block);
+  });
+}
+
+// ── Tone.js scheduling ───────────────────────────────────────────────────────
 function scheduleMidi() {
   Tone.Transport.cancel();
   Tone.Transport.stop();
   Tone.Transport.position = 0;
-
   if (!midiData) return;
 
-  const bpm       = midiData.header.tempos[0]?.bpm ?? 120;
-  Tone.Transport.bpm.value = bpm * tempoScale;
+  const bpm = midiData.header.tempos[0]?.bpm ?? 120;
+  Tone.Transport.bpm.value = bpm;
 
   midiData.tracks.forEach(track => {
+    const isLH = (track.name || '').toLowerCase().includes('left');
     track.notes.forEach(note => {
       Tone.Transport.schedule(time => {
         if (!sampler || !samplerReady) return;
-        const vel = note.velocity ?? 0.7;
-        sampler.triggerAttackRelease(note.name, note.duration, time, vel);
-        flashKey(note.midi, note.duration);
-        addNoteChip(note.name);
-      }, note.time / tempoScale);
+        sampler.triggerAttackRelease(note.name, note.duration, time, note.velocity);
+        // Track active note for visualization
+        activeNotes.set(note.midi + '-' + note.time, {
+          midi: note.midi, track: isLH ? 'lh' : 'rh',
+          end: note.time + note.duration,
+        });
+      }, note.time);
     });
   });
 
-  // Update seek bar every 100ms
-  Tone.Transport.scheduleRepeat(updateSeek, "100ms");
+  // End-of-song callback
+  Tone.Transport.schedule(() => {
+    stopPlayback();
+  }, totalDuration + 0.5);
 }
 
-function updateSeek() {
-  const pos  = Tone.Transport.seconds;
-  const pct  = totalDuration > 0 ? (pos / totalDuration) * 100 : 0;
-  document.getElementById("seek-bar").value = Math.min(pct, 100);
-  document.getElementById("time-display").textContent =
-    fmtTime(pos) + " / " + fmtTime(totalDuration);
-
-  if (pos >= totalDuration * tempoScale + 0.3) stopPlayback();
-}
-
-// ── Playback controls ──────────────────────────────────────────────────────
+// ── Playback controls ────────────────────────────────────────────────────────
 async function togglePlay() {
-  await Tone.start();  // unlock AudioContext on first user gesture
+  await Tone.start();
 
   if (isPlaying) {
     Tone.Transport.pause();
-    document.getElementById("play-btn").textContent = "▶ Play";
     isPlaying = false;
+    updatePlayButton();
+    cancelAnimationFrame(animFrame);
   } else {
     Tone.Transport.start();
-    document.getElementById("play-btn").textContent = "⏸ Pause";
     isPlaying = true;
+    updatePlayButton();
+    animLoop();
   }
 }
 
 function stopPlayback() {
   Tone.Transport.stop();
   Tone.Transport.cancel();
-  document.getElementById("play-btn").textContent = "▶ Play";
-  document.getElementById("seek-bar").value = 0;
-  document.getElementById("time-display").textContent =
-    "0:00 / " + fmtTime(totalDuration);
-  activeKeys.clear();
-  drawKeyboard();
   isPlaying = false;
-  if (midiData) scheduleMidi();  // re-schedule from beginning
+  activeNotes.clear();
+  updatePlayButton();
+  cancelAnimationFrame(animFrame);
+
+  document.getElementById('seek-fill').style.width = '0%';
+  document.getElementById('time-display').textContent = '0:00 / ' + fmtTime(totalDuration);
+
+  drawKeyboard();
+  if (midiData) {
+    drawPianoRoll(0);
+    scheduleMidi();
+  }
 }
 
-function seek(pct) {
-  const t = (pct / 100) * totalDuration;
-  Tone.Transport.seconds = t;
+function updatePlayButton() {
+  const btn = document.getElementById('play-btn');
+  document.getElementById('play-icon').style.display = isPlaying ? 'none' : 'block';
+  document.getElementById('pause-icon').style.display = isPlaying ? 'block' : 'none';
+  btn.classList.toggle('playing', isPlaying);
 }
 
-function updateTempo(val) {
-  tempoScale = val / 100;
-  document.getElementById("tempo-val").textContent = val + "%";
-  const bpm = midiData?.header.tempos[0]?.bpm ?? 120;
-  Tone.Transport.bpm.value = bpm * tempoScale;
+function seekClick(e) {
+  const track = document.getElementById('seek-track');
+  const rect  = track.getBoundingClientRect();
+  const pct   = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+  Tone.Transport.seconds = pct * totalDuration;
 }
 
 function updateVolume(val) {
   Tone.getDestination().volume.value = Tone.gainToDb(val / 100);
 }
 
-// ── Piano keyboard ─────────────────────────────────────────────────────────
+// ── Animation loop ───────────────────────────────────────────────────────────
+function animLoop() {
+  if (!isPlaying) return;
+
+  const pos = Tone.Transport.seconds;
+  const pct = totalDuration > 0 ? (pos / totalDuration) * 100 : 0;
+
+  document.getElementById('seek-fill').style.width = Math.min(pct, 100) + '%';
+  document.getElementById('time-display').textContent = fmtTime(pos) + ' / ' + fmtTime(totalDuration);
+
+  // Clean expired active notes
+  for (const [key, n] of activeNotes) {
+    if (pos > n.end + 0.05) activeNotes.delete(key);
+  }
+
+  drawPianoRoll(pos);
+  drawKeyboard(pos);
+
+  animFrame = requestAnimationFrame(animLoop);
+}
+
+// ── Piano Roll (Canvas) ──────────────────────────────────────────────────────
+function drawPianoRoll(currentTime = 0) {
+  const area   = document.getElementById('roll-area');
+  const canvas = document.getElementById('piano-roll-canvas');
+  const ctx    = canvas.getContext('2d');
+
+  const W = area.clientWidth;
+  const H = area.clientHeight;
+
+  if (canvas.width !== W * 2 || canvas.height !== H * 2) {
+    canvas.width  = W * 2;
+    canvas.height = H * 2;
+    canvas.style.width  = W + 'px';
+    canvas.style.height = H + 'px';
+    ctx.scale(2, 2);
+  } else {
+    ctx.setTransform(2, 0, 0, 2, 0, 0);
+  }
+
+  ctx.clearRect(0, 0, W, H);
+
+  const noteRange = ROLL.highNote - ROLL.lowNote;
+  const noteH     = H / noteRange;
+  const pps       = ROLL.pixPerSec;
+
+  // Viewport: center on current time, show ~5s ahead
+  const viewStart = Math.max(0, currentTime - W * 0.3 / pps);
+  const viewEnd   = viewStart + W / pps;
+
+  // ── Background grid ──
+  ctx.fillStyle = 'rgba(255,255,255,0.008)';
+  for (let n = ROLL.lowNote; n <= ROLL.highNote; n++) {
+    if (isBlackKey(n)) {
+      const y = H - (n - ROLL.lowNote + 1) * noteH;
+      ctx.fillRect(0, y, W, noteH);
+    }
+  }
+
+  // Octave lines (C notes)
+  ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+  ctx.lineWidth = 0.5;
+  for (let n = ROLL.lowNote; n <= ROLL.highNote; n++) {
+    if (n % 12 === 0) {
+      const y = H - (n - ROLL.lowNote) * noteH;
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(W, y);
+      ctx.stroke();
+    }
+  }
+
+  // Beat lines
+  if (songBpm > 0) {
+    const beatSec = 60 / songBpm;
+    const firstBeat = Math.floor(viewStart / beatSec) * beatSec;
+    ctx.lineWidth = 0.5;
+    for (let t = firstBeat; t <= viewEnd; t += beatSec) {
+      const x = (t - viewStart) * pps;
+      const isMeasure = Math.round(t / beatSec) % 4 === 0;
+      ctx.strokeStyle = isMeasure ? 'rgba(255,255,255,0.08)' : 'rgba(255,255,255,0.03)';
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, H);
+      ctx.stroke();
+    }
+  }
+
+  // ── Section background colors ──
+  sections.forEach(sec => {
+    if (sec.end < viewStart || sec.start > viewEnd) return;
+    const x1 = Math.max(0, (sec.start - viewStart) * pps);
+    const x2 = Math.min(W, (sec.end - viewStart) * pps);
+    const colors = {
+      intro: 'rgba(74,102,112,0.06)', verse: 'rgba(91,122,92,0.06)',
+      chorus: 'rgba(160,122,79,0.08)', instrumental: 'rgba(106,90,138,0.06)',
+      outro: 'rgba(74,102,112,0.06)',
+    };
+    ctx.fillStyle = colors[sec.type] || 'transparent';
+    ctx.fillRect(x1, 0, x2 - x1, H);
+  });
+
+  // ── Draw notes ──
+  function drawNotes(notes, color, glowColor) {
+    notes.forEach(n => {
+      if (n.end < viewStart || n.start > viewEnd) return;
+      const x = (n.start - viewStart) * pps;
+      const w = Math.max(2, (n.end - n.start) * pps);
+      const y = H - (n.midi - ROLL.lowNote + 1) * noteH;
+      const h = Math.max(2, noteH - 1);
+
+      const isActive = currentTime >= n.start && currentTime <= n.end;
+
+      if (isActive) {
+        // Glow effect for active notes
+        ctx.shadowColor = glowColor;
+        ctx.shadowBlur = 8;
+      }
+
+      ctx.fillStyle = isActive ? color : color + 'aa';
+      ctx.beginPath();
+      ctx.roundRect(x, y, w, h, 2);
+      ctx.fill();
+
+      ctx.shadowColor = 'transparent';
+      ctx.shadowBlur = 0;
+    });
+  }
+
+  drawNotes(lhNotes, '#5b8abf', 'rgba(91,138,191,0.5)');
+  drawNotes(rhNotes, '#d4a574', 'rgba(212,165,116,0.5)');
+
+  // ── Playhead cursor ──
+  if (currentTime > 0) {
+    const cx = (currentTime - viewStart) * pps;
+    ctx.strokeStyle = 'rgba(255,255,255,0.6)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(cx, 0);
+    ctx.lineTo(cx, H);
+    ctx.stroke();
+
+    // Cursor glow
+    const grad = ctx.createLinearGradient(cx - 20, 0, cx + 20, 0);
+    grad.addColorStop(0, 'transparent');
+    grad.addColorStop(0.5, 'rgba(212,165,116,0.08)');
+    grad.addColorStop(1, 'transparent');
+    ctx.fillStyle = grad;
+    ctx.fillRect(cx - 20, 0, 40, H);
+  }
+
+  // ── Note labels on left edge ──
+  ctx.font = '9px DM Sans, sans-serif';
+  ctx.fillStyle = 'rgba(255,255,255,0.15)';
+  ctx.textAlign = 'left';
+  for (let n = ROLL.lowNote; n <= ROLL.highNote; n++) {
+    if (n % 12 === 0) {
+      const y = H - (n - ROLL.lowNote) * noteH + 3;
+      ctx.fillText('C' + Math.floor(n / 12 - 1), 4, y);
+    }
+  }
+}
+
+// ── Piano Keyboard (Canvas) ──────────────────────────────────────────────────
 function buildKeyboard() {
-  const canvas = document.getElementById("keyboard-canvas");
-  const { startNote, endNote, whiteW } = PIANO;
-  const whiteCount = countWhiteKeys(startNote, endNote);
-  canvas.width  = whiteCount * whiteW;
-  canvas.height = PIANO.whiteH;
+  const canvas = document.getElementById('keyboard-canvas');
+  const whiteCount = countWhiteKeys(KB.startNote, KB.endNote);
+  canvas.width  = whiteCount * KB.whiteW * 2;
+  canvas.height = KB.whiteH * 2;
+  canvas.style.width  = whiteCount * KB.whiteW + 'px';
+  canvas.style.height = KB.whiteH + 'px';
   drawKeyboard();
 }
 
-function drawKeyboard() {
-  const canvas = document.getElementById("keyboard-canvas");
-  const ctx    = canvas.getContext("2d");
-  const { startNote, endNote, whiteH, whiteW, blackH, blackW } = PIANO;
+function drawKeyboard(currentTime = 0) {
+  const canvas = document.getElementById('keyboard-canvas');
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(2, 0, 0, 2, 0, 0);
 
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  const { startNote, endNote, whiteH, whiteW, blackH, blackW } = KB;
+  const dispW = canvas.width / 2;
+  const dispH = canvas.height / 2;
+  ctx.clearRect(0, 0, dispW, dispH);
 
-  // White keys pass 1
+  // Find currently active notes
+  const activeRH = new Set();
+  const activeLH = new Set();
+  if (currentTime > 0) {
+    rhNotes.forEach(n => {
+      if (currentTime >= n.start && currentTime <= n.end) activeRH.add(n.midi);
+    });
+    lhNotes.forEach(n => {
+      if (currentTime >= n.start && currentTime <= n.end) activeLH.add(n.midi);
+    });
+  }
+
+  // White keys
   let wx = 0;
   for (let n = startNote; n <= endNote; n++) {
     if (!isBlackKey(n)) {
-      const active = activeKeys.has(n);
-      ctx.fillStyle = active ? "var(--key-active, #7c6af7)" : PIANO.whiteKey || "#f0f0f0";
-      ctx.strokeStyle = "#888";
-      ctx.lineWidth   = 1;
+      const isRH = activeRH.has(n);
+      const isLH = activeLH.has(n);
+
+      if (isRH) {
+        ctx.fillStyle = '#d4a574';
+      } else if (isLH) {
+        ctx.fillStyle = '#5b8abf';
+      } else {
+        ctx.fillStyle = '#e8e4df';
+      }
+
       ctx.fillRect(wx, 0, whiteW - 1, whiteH);
+
+      ctx.strokeStyle = 'rgba(0,0,0,0.15)';
+      ctx.lineWidth = 0.5;
       ctx.strokeRect(wx, 0, whiteW - 1, whiteH);
 
-      if (n % 12 === 0) {  // C notes — label
-        ctx.fillStyle = active ? "#fff" : "#777";
-        ctx.font      = "9px sans-serif";
-        ctx.textAlign = "center";
-        ctx.fillText("C" + Math.floor(n / 12 - 1), wx + whiteW / 2, whiteH - 6);
+      // C labels
+      if (n % 12 === 0) {
+        ctx.fillStyle = (isRH || isLH) ? '#fff' : '#999';
+        ctx.font = '8px DM Sans, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('C' + Math.floor(n / 12 - 1), wx + whiteW / 2, whiteH - 4);
       }
       wx += whiteW;
     }
   }
 
-  // Black keys pass 2 (drawn on top)
+  // Black keys
   wx = 0;
   for (let n = startNote; n <= endNote; n++) {
     if (isBlackKey(n)) {
-      const prevWhiteX = wx - whiteW;  // position of the white key before this black key
-      const bx = prevWhiteX + whiteW - blackW / 2 - 1;
-      const active = activeKeys.has(n);
-      ctx.fillStyle = active ? "var(--key-active, #7c6af7)" : "#1a1a2e";
-      ctx.fillRect(bx, 0, blackW, blackH);
+      const bx = wx - KB.blackW / 2 - 1;
+      const isRH = activeRH.has(n);
+      const isLH = activeLH.has(n);
+
+      if (isRH) {
+        ctx.fillStyle = '#c4883a';
+      } else if (isLH) {
+        ctx.fillStyle = '#3d6590';
+      } else {
+        ctx.fillStyle = '#1a1a2e';
+      }
+
+      ctx.beginPath();
+      ctx.roundRect(bx, 0, blackW, blackH, [0, 0, 2, 2]);
+      ctx.fill();
     } else {
       wx += whiteW;
     }
   }
 }
 
+// ── Keyboard helpers ─────────────────────────────────────────────────────────
 function isBlackKey(n) {
   return [1, 3, 6, 8, 10].includes(n % 12);
 }
@@ -653,78 +1208,60 @@ function countWhiteKeys(start, end) {
   return c;
 }
 
-function flashKey(midiNote, duration) {
-  activeKeys.add(midiNote);
-  drawKeyboard();
-  const releaseMs = Math.min((duration || 0.3) * 1000, 1200);
-  setTimeout(() => {
-    activeKeys.delete(midiNote);
-    drawKeyboard();
-  }, releaseMs);
-}
-
-// ── Note chips ─────────────────────────────────────────────────────────────
-function addNoteChip(name) {
-  const feed  = document.getElementById("note-feed");
-  const chip  = document.createElement("span");
-  chip.className  = "note-chip";
-  chip.textContent = name;
-  feed.appendChild(chip);
-  chip.addEventListener("animationend", () => chip.remove());
-  // Keep feed tidy
-  while (feed.children.length > 30) feed.removeChild(feed.firstChild);
-}
-
-// ── UI state machine ───────────────────────────────────────────────────────
+// ── UI state machine ─────────────────────────────────────────────────────────
 function setUI(state) {
-  const prog   = document.getElementById("progress-section");
-  const player = document.getElementById("player-section");
-  const dlRow  = document.getElementById("download-row");
-  const goBtn  = document.getElementById("go-btn");
+  const overlay  = document.getElementById('proc-overlay');
+  const welcome  = document.getElementById('welcome');
+  const player   = document.getElementById('player');
+  const transport = document.getElementById('transport');
+  const songInfo = document.getElementById('song-info');
+  const goBtn    = document.getElementById('go-btn');
 
-  if (state === "processing") {
-    prog.style.display   = "block";
-    player.style.display = "none";
-    dlRow.style.display  = "none";
-    goBtn.disabled       = true;
-    goBtn.textContent    = "Processing…";
-  } else if (state === "player") {
-    prog.style.display   = "none";
-    player.style.display = "block";
-    dlRow.style.display  = "flex";
-    goBtn.disabled       = false;
-    goBtn.textContent    = "Transcribe →";
+  if (state === 'processing') {
+    overlay.classList.add('active');
+    welcome.style.display  = 'none';
+    player.classList.remove('active');
+    transport.style.display = 'none';
+    goBtn.disabled = true;
+    goBtn.textContent = 'Processing...';
+  } else if (state === 'player') {
+    overlay.classList.remove('active');
+    welcome.style.display  = 'none';
+    player.classList.add('active');
+    transport.style.display = 'flex';
+    songInfo.classList.add('active');
+    goBtn.disabled = false;
+    goBtn.textContent = 'Transcribe';
+    document.getElementById('time-display').textContent = '0:00 / ' + fmtTime(totalDuration);
   } else {
-    prog.style.display   = "none";
-    player.style.display = "none";
-    dlRow.style.display  = "none";
-    goBtn.disabled       = false;
-    goBtn.textContent    = "Transcribe →";
-    document.getElementById("meta-section").style.display = "none";
+    overlay.classList.remove('active');
+    welcome.style.display  = 'flex';
+    player.classList.remove('active');
+    transport.style.display = 'none';
+    songInfo.classList.remove('active');
+    goBtn.disabled = false;
+    goBtn.textContent = 'Transcribe';
   }
 }
 
-// ── Helpers ────────────────────────────────────────────────────────────────
+// ── Helpers ──────────────────────────────────────────────────────────────────
 function fmtTime(secs) {
-  const s = Math.floor(secs % 60);
+  if (!secs || secs < 0) secs = 0;
   const m = Math.floor(secs / 60);
-  return m + ":" + String(s).padStart(2, "0");
-}
-function showError(msg) {
-  const b = document.getElementById("error-banner");
-  b.textContent = "⚠ " + msg;
-  b.style.display = "block";
-}
-function clearError() {
-  document.getElementById("error-banner").style.display = "none";
+  const s = Math.floor(secs % 60);
+  return m + ':' + String(s).padStart(2, '0');
 }
 
-// Allow pressing Enter to trigger transcription
-document.addEventListener("DOMContentLoaded", () => {
-  document.getElementById("url-input").addEventListener("keydown", e => {
-    if (e.key === "Enter") startTranscription();
-  });
-});
+function showError(msg) {
+  const el = document.getElementById('error-toast');
+  el.textContent = msg;
+  el.style.display = 'block';
+  setTimeout(() => { el.style.display = 'none'; }, 5000);
+}
+
+function clearError() {
+  document.getElementById('error-toast').style.display = 'none';
+}
 </script>
 </body>
 </html>

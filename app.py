@@ -58,14 +58,25 @@ def run_job(job_id: str, url: str, mode: str):
     JOBS[job_id]['status'] = 'running'
     try:
         pipeline_fn = _get_pipeline(mode)
-        pipeline_fn(url, midi_path, progress_cb=progress_cb)
+        result = pipeline_fn(url, midi_path, progress_cb=progress_cb)
+
+        # Handle both old (string) and new (dict) return formats
+        if isinstance(result, dict):
+            actual_midi = result.get('midi_path', midi_path)
+            JOBS[job_id]['sections'] = result.get('sections', [])
+            JOBS[job_id]['bpm'] = result.get('bpm')
+            JOBS[job_id]['duration'] = result.get('duration')
+            JOBS[job_id]['song_key'] = result.get('key')
+        else:
+            actual_midi = result or midi_path
+            JOBS[job_id]['sections'] = []
 
         # Render MP3 from MIDI
         progress_cb("Rendering MP3…", 97)
-        mp3_result = _midi_to_mp3(midi_path, mp3_path)
+        mp3_result = _midi_to_mp3(actual_midi, mp3_path)
 
         JOBS[job_id]['status']    = 'done'
-        JOBS[job_id]['midi_path'] = midi_path
+        JOBS[job_id]['midi_path'] = actual_midi
         JOBS[job_id]['mp3_path']  = mp3_result
         JOBS[job_id]['message']   = 'Ready to play!'
         JOBS[job_id]['pct']       = 100
@@ -144,6 +155,19 @@ def get_mp3(job_id):
     return send_file(mp3, mimetype='audio/mpeg',
                      as_attachment=True,
                      download_name=f'piano_cover_{job_id}.mp3')
+
+
+@app.route('/api/sections/<job_id>')
+def get_sections(job_id):
+    job = JOBS.get(job_id)
+    if not job or job['status'] != 'done':
+        return jsonify({'error': 'Not ready'}), 404
+    return jsonify({
+        'sections': job.get('sections', []),
+        'bpm': job.get('bpm'),
+        'duration': job.get('duration'),
+        'key': job.get('song_key'),
+    })
 
 
 @app.route('/api/info/<job_id>')
