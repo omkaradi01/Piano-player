@@ -50,14 +50,8 @@ def _get_model():
         _model = Pop2PianoForConditionalGeneration.from_pretrained("sweetcocoa/pop2piano")
         _processor = Pop2PianoProcessor.from_pretrained("sweetcocoa/pop2piano")
 
-        # Use MPS if available
+        # Force CPU — Pop2Piano's generate() calls .numpy() which fails on MPS
         device = 'cpu'
-        try:
-            if torch.backends.mps.is_available():
-                device = 'mps'
-                log.info("Using Apple MPS acceleration")
-        except AttributeError:
-            pass
 
         _model = _model.to(device)
         _model.eval()

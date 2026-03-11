@@ -1651,8 +1651,8 @@ def _detect_song_sections(audio_path, beat_times, vocals_path=None):
         y, sr = librosa.load(audio_path, sr=22050, mono=True)
         audio_duration = len(y) / sr
 
-        # Compute RMS energy in ~2-second windows
-        window_sec = 2.0
+        # Compute RMS energy in ~4-second windows
+        window_sec = 4.0
         hop = int(window_sec * sr)
         energies = []
         for i in range(0, len(y), hop):
@@ -1666,8 +1666,8 @@ def _detect_song_sections(audio_path, beat_times, vocals_path=None):
         if peak_energy > 0:
             energies = [(t, e / peak_energy) for t, e in energies]
 
-        # Compute vocal energy if vocal stem available
-        vocal_energies = []
+        # Compute vocal presence per window from vocal stem
+        vocal_presence = {}  # time -> bool
         if vocals_path and os.path.exists(vocals_path):
             try:
                 yv, srv = librosa.load(vocals_path, sr=22050, mono=True)
@@ -1676,56 +1676,42 @@ def _detect_song_sections(audio_path, beat_times, vocals_path=None):
                     chunk = yv[i:i + hop]
                     rms = float(np.sqrt(np.mean(chunk ** 2))) if len(chunk) > 0 else 0.0
                     t = i / sr
-                    # Vocal presence: vocal RMS > 0.05 of vocal peak
-                    has_vocal = rms > (vocal_peak * 0.05) if vocal_peak > 0 else False
-                    vocal_energies.append((t, rms, has_vocal))
+                    vocal_presence[t] = rms > (vocal_peak * 0.05) if vocal_peak > 0 else False
             except Exception as exc:
                 log.warning(f"Vocal energy analysis failed: {exc}")
 
-        # Build sections from energy + vocal presence
+        # Build raw sections from energy + vocal presence
+        # Use median energy as dynamic threshold (adapts to each song)
+        all_e = sorted([e for _, e in energies])
+        median_e = all_e[len(all_e) // 2] if all_e else 0.5
+        chorus_thresh = max(0.40, median_e + 0.10)
+
         sections = []
         for idx, (t, energy) in enumerate(energies):
-            t_end = t + window_sec
-            if idx + 1 < len(energies):
-                t_end = energies[idx + 1][0]
-            else:
-                t_end = min(t + window_sec, audio_duration)
+            t_end = energies[idx + 1][0] if idx + 1 < len(energies) else audio_duration
+            has_vocal = vocal_presence.get(t, False)
 
-            # Determine vocal presence for this window
-            has_vocal = False
-            if vocal_energies:
-                for vt, vrms, vp in vocal_energies:
-                    if abs(vt - t) < window_sec:
-                        has_vocal = vp
-                        break
-
-            # Classify section type
-            if has_vocal and energy > 0.55:
+            if has_vocal and energy > chorus_thresh:
                 section_type = 'chorus'
             elif has_vocal and energy > 0.15:
                 section_type = 'verse'
             elif not has_vocal and energy > 0.15:
                 section_type = 'instrumental'
             else:
-                section_type = 'instrumental'  # low energy, no vocals
+                section_type = 'instrumental'
 
             sections.append({
-                'start': t,
-                'end': t_end,
-                'type': section_type,
-                'energy': energy,
+                'start': t, 'end': t_end,
+                'type': section_type, 'energy': energy,
             })
 
         # Post-process: mark intro and outro
         if sections:
-            # First section(s) with low energy → intro
             for s in sections:
                 if s['energy'] < 0.25:
                     s['type'] = 'intro'
                 else:
                     break
-
-            # Last section(s) with declining energy → outro
             for s in reversed(sections):
                 if s['energy'] < 0.25:
                     s['type'] = 'outro'
@@ -1741,9 +1727,21 @@ def _detect_song_sections(audio_path, beat_times, vocals_path=None):
             else:
                 merged.append(dict(s))
 
-        log.info(f"Song sections: {len(merged)} sections detected: "
-                 f"{[s['type'] for s in merged]}")
-        return merged
+        # Absorb tiny sections (<16s) into their neighbors
+        MIN_SECTION = 16.0
+        final = []
+        for s in merged:
+            dur = s['end'] - s['start']
+            if dur < MIN_SECTION and final:
+                # Absorb into previous section
+                final[-1]['end'] = s['end']
+                final[-1]['energy'] = max(final[-1]['energy'], s['energy'])
+            else:
+                final.append(s)
+
+        log.info(f"Song sections: {len(final)} sections detected: "
+                 f"{[s['type'] for s in final]}")
+        return final
 
     except Exception as exc:
         log.warning(f"Song section detection failed: {exc}")
@@ -2103,14 +2101,16 @@ def _build_midi_v19(rh_notes, lh_chords, beat_times, bpm, audio_duration, output
                 i += 1
                 continue
 
-            # Hold until next chord change
+            # Hold until next chord change (max 4 beats)
             hold_end = bt + beat_dur * 2
-            for j in range(i + 1, min(i + 3, len(lh_chords))):
+            for j in range(i + 1, min(i + 8, len(lh_chords))):
                 if j < len(beat_times) and j < len(lh_chords):
                     if lh_chords[j][0] != chord_name:
                         hold_end = float(beat_times[j])
                         break
-            hold_end = min(hold_end, audio_duration)
+            # Cap at 4 beats to prevent absurdly long held notes
+            max_hold = bt + beat_dur * 4
+            hold_end = min(hold_end, max_hold, audio_duration)
             hold_dur = hold_end - bt
 
             if hold_dur < 0.1:
