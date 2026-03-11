@@ -496,36 +496,101 @@ def _transcribe_piano(audio_path, device=None):
     return notes
 
 
+def _clean_piano_transcription(notes, min_dur=0.04, min_vel=25):
+    """
+    Clean up raw piano_transcription_inference output:
+    1. Remove very short notes (< 40ms) — likely noise
+    2. Remove very quiet notes (< vel 25)
+    3. De-duplicate: if same pitch starts within 30ms, keep the louder one
+    4. Limit polyphony to 6 simultaneous notes max
+    """
+    if not notes:
+        return []
+
+    # Step 1: basic filters
+    notes = [(s, e, p, v) for s, e, p, v in notes
+             if (e - s) >= min_dur and v >= min_vel]
+
+    # Step 2: de-duplicate same pitch within 30ms
+    notes = sorted(notes, key=lambda n: (n[0], -n[3]))  # time, then loudest first
+    deduped = []
+    for s, e, p, v in notes:
+        dup = False
+        for ds, de, dp, dv in deduped[-8:]:
+            if dp == p and abs(s - ds) < 0.03:
+                dup = True
+                break
+        if not dup:
+            deduped.append((s, e, p, v))
+    notes = deduped
+
+    # Step 3: limit polyphony — at any time, max 6 notes
+    notes = sorted(notes, key=lambda n: n[0])
+    result = []
+    for s, e, p, v in notes:
+        # Count active notes at this time
+        active = sum(1 for rs, re, rp, rv in result if rs <= s < re)
+        if active < 6:
+            result.append((s, e, p, v))
+
+    log.info(f"Piano cleanup: {len(notes)} → {len(result)} notes "
+             f"(removed noise/dups/excess polyphony)")
+    return result
+
+
 def _split_piano_rh_lh(notes, split_point=60):
     """
     Split transcribed piano notes into RH (melody) and LH (accompaniment).
-    Uses a dynamic split point based on note density analysis.
+    Strategy: at each moment in time, the highest notes go to RH, lowest to LH.
+    This handles crossed-hands and dynamic register changes correctly.
     """
     if not notes:
         return [], []
 
-    # Find natural split: cluster pitches and find the gap
-    pitches = sorted(set(n[2] for n in notes))
-    if len(pitches) < 4:
-        return notes, []
+    # Clean first
+    notes = _clean_piano_transcription(notes)
+    if not notes:
+        return [], []
 
-    # Find largest gap in pitch distribution
-    max_gap = 0
-    best_split = split_point
-    for i in range(len(pitches) - 1):
-        gap = pitches[i + 1] - pitches[i]
-        if gap > max_gap and 48 <= pitches[i] <= 72:
-            max_gap = gap
-            best_split = pitches[i] + gap // 2
+    # Time-slice approach: at each note onset, split active notes
+    # into top group (RH) and bottom group (LH)
+    notes = sorted(notes, key=lambda n: n[0])
+    rh = []
+    lh = []
 
-    # If no clear gap, use median
-    if max_gap < 4:
-        best_split = pitches[len(pitches) // 2]
+    # Process in time windows
+    window = 0.05  # 50ms grouping window
+    i = 0
+    while i < len(notes):
+        # Collect notes starting within this window
+        group_start = notes[i][0]
+        group = []
+        while i < len(notes) and notes[i][0] - group_start < window:
+            group.append(notes[i])
+            i += 1
 
-    rh = [(s, e, p, v) for s, e, p, v in notes if p >= best_split]
-    lh = [(s, e, p, v) for s, e, p, v in notes if p < best_split]
+        if len(group) <= 1:
+            # Single note: assign by pitch
+            for n in group:
+                if n[2] >= split_point:
+                    rh.append(n)
+                else:
+                    lh.append(n)
+        else:
+            # Multiple simultaneous notes: sort by pitch
+            group.sort(key=lambda n: n[2])
+            # Bottom half → LH, top half → RH
+            mid = max(1, len(group) // 2)
+            for n in group[:mid]:
+                lh.append(n)
+            for n in group[mid:]:
+                rh.append(n)
 
-    log.info(f"Piano split at MIDI {best_split}: RH={len(rh)}, LH={len(lh)}")
+    rh.sort(key=lambda n: n[0])
+    lh.sort(key=lambda n: n[0])
+
+    log.info(f"Piano split: RH={len(rh)}, LH={len(lh)} "
+             f"(time-based split, not fixed pitch)")
     return rh, lh
 
 
@@ -1928,20 +1993,20 @@ def _build_midi_v19(rh_notes, lh_chords, beat_times, bpm, audio_duration, output
              f"LH_chords={len(lh_chords)}, bpm={bpm:.0f}")
 
     # ── Step 1: Apply phrase-arc dynamics to RH ──────────────────────────
-    # (replaces random velocity with musical phrase shaping)
-    if phrase_boundaries is not None:
+    # For piano transcription: preserve original velocities, only add light section envelope
+    # For basic-pitch: replace with full phrase-arc dynamics
+    has_direct_lh = lh_notes and len(lh_notes) > 0
+    if phrase_boundaries is not None and not has_direct_lh:
+        # basic-pitch path: full expressiveness rewrite
         phrase_ids = _assign_phrase_ids(rh_notes, phrase_boundaries)
         rh_notes = _apply_phrase_arc_dynamics(rh_notes, phrase_ids, sections)
         rh_notes = _apply_phrase_rubato(rh_notes, phrase_ids, bpm)
 
     # ── Step 2: Melody-leads-bass asynchrony ─────────────────────────────
-    # Professional pianists' melody hand leads by ~25ms
-    rh_notes, lh_source = _apply_melody_leads_bass(
-        rh_notes, lh_notes if lh_notes else lh_chords, lead_ms=22)
-    if lh_notes:
-        lh_notes = lh_source
-    else:
-        lh_chords = lh_source
+    # Only for chord-based LH — direct transcription already has correct timing
+    if not (lh_notes and len(lh_notes) > 0):
+        rh_notes, lh_chords = _apply_melody_leads_bass(
+            rh_notes, lh_chords, lead_ms=22)
 
     # ── Step 3: Write RH with subtle humanization ────────────────────────
     for s, e, p, v in rh_notes:
