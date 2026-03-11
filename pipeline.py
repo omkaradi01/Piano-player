@@ -2211,123 +2211,88 @@ def process_youtube_to_piano_midi(url, output_path, progress_cb=None):
         accomp_path = stems.get('no_vocals') or stems.get('other')
 
         # ══════════════════════════════════════════════════════════════════
-        #  v19: DUAL-ENGINE TRANSCRIPTION
+        #  v20: SMART HYBRID TRANSCRIPTION
         #
-        #  Strategy A (piano_transcription_inference — PREFERRED):
-        #    Use Bytedance's 96.7% F1 piano transcription on the full mix
-        #    AND on the accompaniment stem. This captures actual piano parts
-        #    perfectly and works for any polyphonic piano content.
+        #  The key insight: piano_transcription_inference was trained on SOLO
+        #  PIANO (MAESTRO). On a full mix, it hallucinates piano notes from
+        #  drums, bass, vocals, etc. So we NEVER run it on the full mix.
         #
-        #  Strategy B (basic-pitch — FALLBACK):
-        #    Layer-by-layer: vocal melody + accompaniment chords + gap fill
-        #    Better for vocal-driven songs where piano isn't prominent.
+        #  Instead:
+        #    RH (melody):  basic-pitch on VOCAL stem → clean monophonic melody
+        #    LH (harmony): piano_transcription_inference on ACCOMPANIMENT stem
+        #                   (after vocals removed — cleaner for piano/keys)
+        #    Gap-fill:     basic-pitch on full audio for instrumental sections
         #
-        #  We try A first. If A produces enough notes, use it.
-        #  Otherwise fall back to B.
+        #  This gives us: accurate vocal melody + actual chord/piano parts
+        #  from the accompaniment, without hallucinating notes from drums.
         # ══════════════════════════════════════════════════════════════════
-        rh_notes_4 = []  # (start, end, pitch, velocity)
-        lh_notes_4 = []  # separate LH note array for direct piano transcription
-        lh_chords = []    # chord-based LH (fallback)
+        rh_notes_4 = []
+        lh_notes_4 = []
+        lh_chords = []
         used_piano_transcription = False
 
-        # ── STRATEGY A: Piano transcription inference ──────────────────
-        if _piano_transcription_available():
-            prog("Transcribing piano (Bytedance AI, 96.7% accuracy)…", 35)
+        # ── STEP 1: RH melody from vocal stem ─────────────────────────
+        use_basic_pitch = _basic_pitch_available()
+        vocal_notes = []
+        full_notes = []
+
+        if vocals_path and use_basic_pitch:
+            prog("Extracting vocal melody…", 35)
             try:
-                # Transcribe the FULL audio — captures all piano content
-                full_piano = _transcribe_piano(mono_wav)
-                log.info(f"Piano transcription (full): {len(full_piano)} notes")
-
-                # Also transcribe accompaniment stem for cleaner chords
-                accomp_piano = []
-                if accomp_path:
-                    try:
-                        accomp_piano = _transcribe_piano(accomp_path)
-                        log.info(f"Piano transcription (accomp): {len(accomp_piano)} notes")
-                    except Exception as exc:
-                        log.warning(f"Piano transcription on accomp failed: {exc}")
-
-                # Use full audio transcription, merge with accompaniment
-                all_piano = full_piano
-                if accomp_piano:
-                    # Merge: add accomp notes that don't overlap with full
-                    existing_times = set()
-                    for s, e, p, v in full_piano:
-                        existing_times.add((round(s, 2), p))
-                    for s, e, p, v in accomp_piano:
-                        if (round(s, 2), p) not in existing_times:
-                            all_piano.append((s, e, p, v))
-
-                if len(all_piano) >= 20:
-                    # Split into RH and LH
-                    rh_notes_4, lh_notes_4 = _split_piano_rh_lh(all_piano)
-                    used_piano_transcription = True
-                    log.info(f"Piano transcription SUCCESS: RH={len(rh_notes_4)}, LH={len(lh_notes_4)}")
-                else:
-                    log.info(f"Piano transcription produced too few notes ({len(all_piano)}), falling back")
-
+                v22k = os.path.join(work_dir, 'vocals_22k.wav')
+                _to_mono(vocals_path, v22k, sr=22050)
+                vocal_raw = _transcribe_basic_pitch(
+                    v22k, onset_thresh=0.4, frame_thresh=0.28,
+                    min_note_ms=80, min_freq=130, max_freq=1400
+                )
+                log.info(f"Vocal raw: {len(vocal_raw)} notes")
+                vocal_notes = _clean_melody_smart(
+                    vocal_raw, min_dur=0.08, min_pitch=48, dedup_window=0.20
+                )
+                log.info(f"Vocal clean melody: {len(vocal_notes)} notes")
             except Exception as exc:
-                log.warning(f"Piano transcription failed: {exc}")
-                import traceback; traceback.print_exc()
+                log.warning(f"basic-pitch on vocals failed: {exc}")
 
-        # ── STRATEGY B: basic-pitch layer-by-layer (FALLBACK) ──────────
-        if not rh_notes_4:
-            use_basic_pitch = _basic_pitch_available()
-            if use_basic_pitch:
-                vocal_notes = []
-                full_notes = []
+            # ── STEP 2: Gap-fill from full audio (instrumental sections) ──
+            prog("Transcribing full audio for gaps…", 50)
+            try:
+                full_raw = _transcribe_basic_pitch(
+                    mono_wav, onset_thresh=0.4, frame_thresh=0.25,
+                    min_note_ms=80, min_freq=130, max_freq=1400
+                )
+                log.info(f"Full audio raw: {len(full_raw)} notes")
+                full_notes = full_raw
+            except Exception as exc:
+                log.warning(f"basic-pitch on full audio failed: {exc}")
 
-                if vocals_path:
-                    prog("Transcribing vocal melody…", 35)
-                    try:
-                        v22k = os.path.join(work_dir, 'vocals_22k.wav')
-                        _to_mono(vocals_path, v22k, sr=22050)
-                        vocal_raw = _transcribe_basic_pitch(
-                            v22k, onset_thresh=0.4, frame_thresh=0.28,
-                            min_note_ms=80, min_freq=130, max_freq=1400
-                        )
-                        log.info(f"Vocal raw: {len(vocal_raw)} notes")
-                        vocal_notes = _clean_melody_smart(
-                            vocal_raw, min_dur=0.08, min_pitch=48, dedup_window=0.20
-                        )
-                        log.info(f"Vocal clean melody: {len(vocal_notes)} notes")
-                    except Exception as exc:
-                        log.warning(f"basic-pitch on vocals failed: {exc}")
+            # Combine vocal melody + gap-fill
+            if vocal_notes:
+                rh_notes_4 = _fill_gaps_from_full(vocal_notes, full_notes)
+            elif full_notes:
+                rh_notes_4 = _clean_melody_smart(
+                    full_notes, min_dur=0.12, min_pitch=55
+                )
+            log.info(f"Final RH melody: {len(rh_notes_4)} notes")
 
-                prog("Transcribing full audio for gaps…", 50)
+            # ── STEP 3: LH from accompaniment stem ───────────────────────
+            #  Use basic-pitch on the accompaniment (vocals removed) to find
+            #  chord/harmony notes. This avoids the hallucination problem of
+            #  running piano_transcription_inference on the full mix.
+            if accomp_path:
+                prog("Transcribing accompaniment for LH…", 60)
                 try:
-                    full_raw = _transcribe_basic_pitch(
-                        mono_wav, onset_thresh=0.4, frame_thresh=0.25,
-                        min_note_ms=80, min_freq=130, max_freq=1400
+                    acc22k = os.path.join(work_dir, 'accomp_22k.wav')
+                    _to_mono(accomp_path, acc22k, sr=22050)
+                    accomp_notes = _transcribe_basic_pitch(
+                        acc22k, onset_thresh=0.55, frame_thresh=0.35,
+                        min_note_ms=200, max_freq=700
                     )
-                    log.info(f"Full audio raw: {len(full_raw)} notes")
-                    full_notes = full_raw
+                    lh_chords = _notes_to_lh_chords(
+                        accomp_notes, beat_times, bpm, audio_duration
+                    )
+                    log.info(f"Accompaniment → {len(lh_chords)} beat chords")
                 except Exception as exc:
-                    log.warning(f"basic-pitch on full audio failed: {exc}")
-
-                if vocal_notes:
-                    rh_notes_4 = _fill_gaps_from_full(vocal_notes, full_notes)
-                elif full_notes:
-                    rh_notes_4 = _clean_melody_smart(
-                        full_notes, min_dur=0.12, min_pitch=55
-                    )
-                log.info(f"Final RH melody: {len(rh_notes_4)} notes")
-
-                if accomp_path:
-                    prog("Transcribing accompaniment…", 60)
-                    try:
-                        acc22k = os.path.join(work_dir, 'accomp_22k.wav')
-                        _to_mono(accomp_path, acc22k, sr=22050)
-                        accomp_notes = _transcribe_basic_pitch(
-                            acc22k, onset_thresh=0.55, frame_thresh=0.35,
-                            min_note_ms=200, max_freq=700
-                        )
-                        lh_chords = _notes_to_lh_chords(
-                            accomp_notes, beat_times, bpm, audio_duration
-                        )
-                        log.info(f"Accompaniment → {len(lh_chords)} beat chords")
-                    except Exception as exc:
-                        log.warning(f"basic-pitch on accompaniment failed: {exc}")
+                    log.warning(f"basic-pitch on accompaniment failed: {exc}")
 
         # ══════════════════════════════════════════════════════════════════
         #  FALLBACK: old RMVPE/torchcrepe chain if basic-pitch unavailable
